@@ -9,20 +9,21 @@
 GeckoSharedLibrary("mozinference")
 SHARED_LIBRARY_NAME = "mozinference"
 
-# Export only the symbols we need for dynamic linking. The WebNN engine
-# functions generated from WebNN.webidl are appended to mozinference.symbols.
-GENERATED_FILES += ["libmozinference.symbols"]
-GENERATED_FILES[
-    "libmozinference.symbols"
-].script = "/dom/webnn/codegen/webnn_codegen.py:mozinference_symbols"
-GENERATED_FILES["libmozinference.symbols"].inputs = [
-    "mozinference.symbols",
-    "/dom/webidl/WebNN.webidl",
-]
-SYMBOLS_FILE = "!libmozinference.symbols"
-EXTRA_LINK_DEPS += ["!libmozinference.symbols"]
-
+# Export only the symbols we need for dynamic linking
 if CONFIG["OS_ARCH"] == "Darwin":
+    # The WebNN engine functions generated from WebNN.webidl are appended to
+    # mozinference.symbols.
+    GENERATED_FILES += ["libmozinference.symbols"]
+    GENERATED_FILES[
+        "libmozinference.symbols"
+    ].script = "/dom/webnn/codegen/webnn_codegen.py:mozinference_symbols"
+    GENERATED_FILES["libmozinference.symbols"].inputs = [
+        "mozinference.symbols",
+        "/dom/webidl/WebNN.webidl",
+    ]
+    SYMBOLS_FILE = "!libmozinference.symbols"
+    EXTRA_LINK_DEPS += ["!libmozinference.symbols"]
+
     USE_LIBS += ["webnn_engine"]
     OS_LIBS += [
         "-framework CoreML",
@@ -30,3 +31,5 @@ if CONFIG["OS_ARCH"] == "Darwin":
         "c++",
         "objc",
     ]
+else:
+    SYMBOLS_FILE = "mozinference.symbols"
