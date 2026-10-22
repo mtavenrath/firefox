@@ -2978,7 +2978,7 @@ impl CoremlMlProgramConverter {
             let ty = Self::create_named_value_type(name.clone(), fp32, &reduced_shape, false);
             block
                 .operations
-                .push(Self::create_mil_operation("reduce_mean", inputs, vec![ty]));
+                .push(Self::create_mil_operation(kind, inputs, vec![ty]));
             name
         };
         let x = if epsilon == 0.0 {
@@ -3090,6 +3090,23 @@ impl CoremlMlProgramConverter {
             fp32,
             shape,
         );
+        if input.descriptor.data_type == DataType::Float16 && (scale.is_some() || bias.is_some()) {
+            // Prevent CoreML from fusing affine normalization incorrectly for subnormal fp16 inputs.
+            let rounded = Self::cast_with_graph_shape(
+                block,
+                &current,
+                format!("{output_name}_normalized_fp16"),
+                MilType::Float16 as i32,
+                shape,
+            );
+            current = Self::cast_with_graph_shape(
+                block,
+                &rounded,
+                format!("{output_name}_affine_fp32"),
+                fp32,
+                shape,
+            );
+        }
         let mut permutation: Vec<u32> = (0..affine_axes.len() as u32).collect();
         permutation.sort_by_key(|&i| affine_axes[i as usize]);
         for (parameter, kind, tag) in [(scale, "mul", "scale"), (bias, "add", "bias")] {
@@ -11686,6 +11703,95 @@ mod tests {
                 "add",
             ]
         );
+    }
+
+    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
+    #[test]
+    fn instance_normalization_float16_subnormal_constant_affine() {
+        use crate::executors::coreml::{CoremlInput, run_coreml_with_inputs_with_weights};
+        use crate::operator_options::MLInstanceNormalizationOptions;
+        let descriptor = |shape: &[u32]| OperandDescriptor {
+            data_type: DataType::Float16,
+            shape: s(shape),
+            pending_permutation: vec![],
+        };
+        let mut graph = GraphInfo {
+            input_operands: vec![0],
+            output_operands: vec![3],
+            operands: vec![
+                Operand {
+                    name: Some("input".into()),
+                    kind: OperandKind::Input,
+                    descriptor: descriptor(&[1, 2, 2, 2]),
+                },
+                Operand {
+                    name: Some("scale".into()),
+                    kind: OperandKind::Constant,
+                    descriptor: descriptor(&[2]),
+                },
+                Operand {
+                    name: Some("bias".into()),
+                    kind: OperandKind::Constant,
+                    descriptor: descriptor(&[2]),
+                },
+                Operand {
+                    name: Some("output".into()),
+                    kind: OperandKind::Output,
+                    descriptor: descriptor(&[1, 2, 2, 2]),
+                },
+            ],
+            operations: vec![Operation::InstanceNormalization {
+                input: 0,
+                options: Some(MLInstanceNormalizationOptions {
+                    scale: Some(1),
+                    bias: Some(2),
+                    epsilon: 0.0,
+                    layout: "nchw".into(),
+                    ..Default::default()
+                }),
+                outputs: vec![3],
+            }],
+            ..Default::default()
+        };
+        for (id, values) in [(1, [0.5f32, 2.0]), (2, [0.25, -0.5])] {
+            let data = values
+                .into_iter()
+                .flat_map(|v| half::f16::from_f32(v).to_le_bytes())
+                .collect();
+            graph
+                .constant_operand_ids_to_handles
+                .insert(id, ConstantData { data, label: None });
+        }
+        let converted = CoremlMlProgramConverter.convert(&graph).unwrap();
+        let unit = 2.0f32.powi(-24);
+        let attempts = run_coreml_with_inputs_with_weights(
+            &converted.data,
+            converted.weights_data.as_deref(),
+            vec![CoremlInput {
+                name: super::super::coreml_feature_name("input"),
+                shape: vec![1, 2, 2, 2],
+                data: vec![
+                    unit,
+                    -unit,
+                    unit,
+                    -unit,
+                    2.0 * unit,
+                    -2.0 * unit,
+                    2.0 * unit,
+                    -2.0 * unit,
+                ],
+            }],
+        )
+        .unwrap();
+        for attempt in attempts {
+            let outputs = attempt.result.unwrap();
+            assert_eq!(
+                outputs[0].data,
+                [0.75, -0.25, 0.75, -0.25, 1.5, -2.5, 1.5, -2.5],
+                "{}",
+                attempt.compute_unit
+            );
+        }
     }
 
     /// Helper to create a simple graph with a Float16 constant
