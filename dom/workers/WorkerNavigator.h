@@ -29,6 +29,7 @@ class Instance;
 namespace dom {
 class StorageManager;
 class MediaCapabilities;
+class ML;
 class LockManager;
 class Permissions;
 class ServiceWorkerContainer;
@@ -47,6 +48,7 @@ class WorkerNavigator final : public nsWrapperCache {
   RefPtr<network::Connection> mConnection;
   RefPtr<dom::MediaCapabilities> mMediaCapabilities;
   RefPtr<webgpu::Instance> mWebGpu;
+  RefPtr<dom::ML> mML;
   RefPtr<dom::LockManager> mLocks;
   RefPtr<dom::Permissions> mPermissions;
   RefPtr<ServiceWorkerContainer> mServiceWorkerContainer;
@@ -116,6 +118,8 @@ class WorkerNavigator final : public nsWrapperCache {
   dom::MediaCapabilities* MediaCapabilities();
 
   webgpu::Instance* Gpu();
+
+  dom::ML* Ml();
 
   dom::LockManager* Locks();
 

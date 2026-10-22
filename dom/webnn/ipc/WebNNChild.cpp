@@ -7,37 +7,79 @@
 
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/MLContext.h"
+#include "mozilla/dom/WorkerPrivate.h"
+#include "mozilla/dom/WorkerRef.h"
+#include "nsThreadUtils.h"
+#include "nsXULAppAPI.h"
 
 namespace mozilla::webnn {
 
 WebNNChild::WebNNChild(dom::MLContext* aContext) : mContext(aContext) {}
 
+WebNNChild::~WebNNChild() = default;
+
+#ifndef ANDROID
+static bool CreateWebNNParent(ipc::Endpoint<PWebNNParent>&& aEndpoint) {
+  MOZ_ASSERT(NS_IsMainThread());
+  dom::ContentChild* content = dom::ContentChild::GetSingleton();
+  return content && content->SendAcquireHWInferenceProcess() &&
+         content->SendCreateWebNN(std::move(aEndpoint));
+}
+
+static void ReleaseHWInferenceConnection() {
+  MOZ_ASSERT(NS_IsMainThread());
+  if (dom::ContentChild* content = dom::ContentChild::GetSingleton()) {
+    content->SendReleaseHWInferenceConnection();
+  }
+}
+#endif
+
 /* static */
 already_AddRefed<WebNNChild> WebNNChild::Create(dom::MLContext* aContext) {
-  MOZ_ASSERT(NS_IsMainThread());
-
 #ifdef ANDROID
   return nullptr;
 #else
-  dom::ContentChild* contentChild = dom::ContentChild::GetSingleton();
-  if (!contentChild) {
+  if (!XRE_IsContentProcess()) {
     return nullptr;
+  }
+  RefPtr<WebNNChild> child = new WebNNChild(aContext);
+  dom::WorkerPrivate* worker = nullptr;
+  if (!NS_IsMainThread()) {
+    worker = dom::GetCurrentThreadWorkerPrivate();
+    MOZ_ASSERT(worker);
+    child->mWorkerRef = dom::IPCWorkerRef::Create(
+        worker, "WebNNChild", [child]() { child->Detach(); });
+    if (!child->mWorkerRef) {
+      return nullptr;
+    }
   }
 
   ipc::Endpoint<PWebNNParent> parentEndpoint;
   ipc::Endpoint<PWebNNChild> childEndpoint;
-  if (NS_FAILED(PWebNN::CreateEndpoints(&parentEndpoint, &childEndpoint))) {
+  if (NS_FAILED(PWebNN::CreateEndpoints(&parentEndpoint, &childEndpoint)) ||
+      !childEndpoint.Bind(child)) {
+    child->mWorkerRef = nullptr;
     return nullptr;
   }
 
-  RefPtr<WebNNChild> child = new WebNNChild(aContext);
-  if (!childEndpoint.Bind(child)) {
-    return nullptr;
+  if (worker) {
+    nsresult rv = NS_DispatchToMainThread(NS_NewRunnableFunction(
+        "WebNNChild::CreateWebNNParent",
+        [endpoint = std::move(parentEndpoint)]() mutable {
+          CreateWebNNParent(std::move(endpoint));
+        }));
+    if (NS_FAILED(rv)) {
+      child->Detach();
+      return nullptr;
+    }
+    child->mHoldsConnection = true;
+  } else {
+    child->mHoldsConnection = true;
+    if (!CreateWebNNParent(std::move(parentEndpoint))) {
+      child->Detach();
+      return nullptr;
+    }
   }
-
-  contentChild->SendAcquireHWInferenceProcess();
-  child->mHoldsConnection = true;
-  contentChild->SendCreateWebNN(std::move(parentEndpoint));
   return child.forget();
 #endif
 }
@@ -61,8 +103,12 @@ void WebNNChild::ActorDestroy(ActorDestroyReason aReason) {
 #ifndef ANDROID
   if (mHoldsConnection) {
     mHoldsConnection = false;
-    if (dom::ContentChild* contentChild = dom::ContentChild::GetSingleton()) {
-      contentChild->SendReleaseHWInferenceConnection();
+    if (NS_IsMainThread()) {
+      ReleaseHWInferenceConnection();
+    } else {
+      MOZ_ALWAYS_SUCCEEDS(NS_DispatchToMainThread(
+          NS_NewRunnableFunction("WebNNChild::ReleaseHWInferenceConnection",
+                                 []() { ReleaseHWInferenceConnection(); })));
     }
   }
 #endif
@@ -71,6 +117,7 @@ void WebNNChild::ActorDestroy(ActorDestroyReason aReason) {
     mContext = nullptr;
     context->OnContextLost("The WebNN process went away"_ns);
   }
+  mWorkerRef = nullptr;
 }
 
 }  // namespace mozilla::webnn

@@ -9,13 +9,14 @@
 #include "mozilla/webnn/PWebNNChild.h"
 
 namespace mozilla::dom {
+class IPCWorkerRef;
 class MLContext;
-}
+}  // namespace mozilla::dom
 
 namespace mozilla::webnn {
 
-// Content process side of PWebNN, owned by an MLContext. Bound on the main
-// thread, and holds a connection to the HWInference process while alive.
+// Content process side of PWebNN, owned by an MLContext. Bound on the
+// context's owning thread, holding a connection to HWInference while alive.
 class WebNNChild final : public PWebNNChild {
  public:
   NS_INLINE_DECL_REFCOUNTING(WebNNChild, override)
@@ -33,10 +34,11 @@ class WebNNChild final : public PWebNNChild {
 
  private:
   explicit WebNNChild(dom::MLContext* aContext);
-  ~WebNNChild() = default;
+  ~WebNNChild();
 
   // Weak, cleared by Detach().
   dom::MLContext* mContext;
+  RefPtr<dom::IPCWorkerRef> mWorkerRef;
   bool mHoldsConnection = false;
 };
 

@@ -3465,6 +3465,7 @@ nsresult WorkerPrivate::GetLoadInfo(
     loadInfo.mUseRegularPrincipal = aParent->UseRegularPrincipal();
     loadInfo.mUsingStorageAccess = aParent->UsingStorageAccess();
     loadInfo.mSerialAllowed = aParent->SerialAllowed();
+    loadInfo.mWebNNAllowed = aParent->WebNNAllowed();
     loadInfo.mCookieJarSettings = aParent->CookieJarSettings();
     if (loadInfo.mCookieJarSettings) {
       loadInfo.mCookieJarSettingsArgs = aParent->CookieJarSettingsArgs();
@@ -3641,6 +3642,8 @@ nsresult WorkerPrivate::GetLoadInfo(
       loadInfo.mUsingStorageAccess = document->UsingStorageAccess();
       loadInfo.mSerialAllowed =
           PermissionsPolicyUtils::IsFeatureAllowed(document, u"serial"_ns);
+      loadInfo.mWebNNAllowed =
+          PermissionsPolicyUtils::IsFeatureAllowed(document, u"webnn"_ns);
       loadInfo.mShouldResistFingerprinting =
           document->ShouldResistFingerprinting(
               RFPTarget::IsAlwaysEnabledForPrecompute);

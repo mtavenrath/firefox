@@ -34,6 +34,9 @@ WorkerNavigator includes NavigatorLocks;
 // https://gpuweb.github.io/gpuweb/#navigator-gpu
 WorkerNavigator includes NavigatorGPU;
 
+// https://webmachinelearning.github.io/webnn/
+WorkerNavigator includes NavigatorML;
+
 // https://w3c.github.io/permissions/#webidl-2112232240
 [Exposed=(Worker)]
 partial interface WorkerNavigator {

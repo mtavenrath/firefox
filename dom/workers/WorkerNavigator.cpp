@@ -10,6 +10,7 @@
 #include "WorkerRunnable.h"
 #include "WorkerScope.h"
 #include "mozilla/dom/LockManager.h"
+#include "mozilla/dom/ML.h"
 #include "mozilla/dom/MediaCapabilities.h"
 #include "mozilla/dom/Navigator.h"
 #include "mozilla/dom/Permissions.h"
@@ -48,6 +49,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(WorkerNavigator)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mConnection)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mMediaCapabilities)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mWebGpu)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mML)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mLocks)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPermissions)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mServiceWorkerContainer)
@@ -89,6 +91,7 @@ void WorkerNavigator::Invalidate() {
   mMediaCapabilities = nullptr;
 
   mWebGpu = nullptr;
+  mML = nullptr;
 
   if (mLocks) {
     mLocks->Shutdown();
@@ -288,6 +291,15 @@ webgpu::Instance* WorkerNavigator::Gpu() {
     mWebGpu = webgpu::Instance::Create(global);
   }
   return mWebGpu;
+}
+
+dom::ML* WorkerNavigator::Ml() {
+  if (!mML) {
+    WorkerPrivate* worker = GetCurrentThreadWorkerPrivate();
+    MOZ_ASSERT(worker);
+    mML = new dom::ML(worker->GlobalScope());
+  }
+  return mML;
 }
 
 dom::LockManager* WorkerNavigator::Locks() {

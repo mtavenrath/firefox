@@ -42,10 +42,13 @@ import WebIDL  # noqa: E402
 # Declarations WebNN.webidl refers to but that live in other files.
 PRELUDE = """
 [Global=Window, Exposed=Window] interface Window {};
+[Global=Worker, Exposed=Worker] interface WorkerGlobalScope {};
+[Exposed=Worker] interface WorkerNavigator {};
+WorkerNavigator includes NavigatorML;
 [Exposed=Window] interface Navigator {};
 Navigator includes NavigatorML;
-[Exposed=Window] interface GPUDevice {};
-[Exposed=Window] interface GPUBuffer {};
+[Exposed=(Window, Worker)] interface GPUDevice {};
+[Exposed=(Window, Worker)] interface GPUBuffer {};
 typedef (ArrayBuffer or ArrayBufferView) AllowSharedBufferSource;
 """
 

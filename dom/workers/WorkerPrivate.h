@@ -1049,6 +1049,11 @@ class WorkerPrivate final
     return mLoadInfo.mSerialAllowed;
   }
 
+  bool WebNNAllowed() const {
+    AssertIsOnWorkerThread();
+    return mLoadInfo.mWebNNAllowed;
+  }
+
   nsICookieJarSettings* CookieJarSettings() const {
     // Any thread.
     MOZ_ASSERT(mLoadInfo.mCookieJarSettings);

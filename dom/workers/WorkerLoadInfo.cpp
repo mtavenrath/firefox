@@ -95,6 +95,7 @@ WorkerLoadInfoData::WorkerLoadInfoData()
       mUseRegularPrincipal(false),
       mUsingStorageAccess(false),
       mSerialAllowed(true),
+      mWebNNAllowed(true),
       mServiceWorkersTestingInWindow(false),
       mShouldResistFingerprinting(false),
       mIsThirdPartyContext(true),

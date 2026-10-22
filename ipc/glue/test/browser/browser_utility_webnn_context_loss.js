@@ -31,3 +31,52 @@ add_task(async function test_webnn_context_loss_after_cycle_collection() {
     });
   });
 });
+
+add_task(async function test_webnn_worker_shutdown() {
+  await SpecialPowers.pushPrefEnv({ set: [["dom.webnn.enabled", true]] });
+  for (const action of ["terminate", "close"]) {
+    await BrowserTestUtils.withNewTab("https://example.com/", async browser => {
+      await SpecialPowers.spawn(browser, [], async () => {
+        const source = `
+          self.context = await navigator.ml.createContext();
+          onmessage = () => {
+            navigator.ml.createContext().catch(() => {});
+            close();
+          };
+          postMessage('ready');
+        `;
+        const url = content.URL.createObjectURL(
+          new content.Blob([source], { type: "text/javascript" })
+        );
+        const worker = new content.Worker(url, { type: "module" });
+        content.webnnLifecycleWorker = worker;
+        content.webnnLifecycleURL = url;
+        await new Promise((resolve, reject) => {
+          worker.onmessage = resolve;
+          worker.onerror = event => reject(new Error(event.message));
+        });
+      });
+      const pid = await checkUtilityExists("hwInference");
+      const shutdown = TestUtils.topicObserved(
+        "ipc:utility-shutdown",
+        (subject, data) => Number(data) === pid
+      );
+      await SpecialPowers.spawn(browser, [action], shutdownAction => {
+        const worker = content.webnnLifecycleWorker;
+        if (shutdownAction === "terminate") {
+          worker.terminate();
+        } else {
+          worker.postMessage("close");
+        }
+        content.URL.revokeObjectURL(content.webnnLifecycleURL);
+        delete content.webnnLifecycleWorker;
+        delete content.webnnLifecycleURL;
+      });
+      const [subject] = await shutdown;
+      Assert.ok(
+        !subject.QueryInterface(Ci.nsIPropertyBag2).hasKey("dumpID"),
+        `${action} releases the last inference connection without crashing`
+      );
+    });
+  }
+});

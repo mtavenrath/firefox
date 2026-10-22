@@ -38,5 +38,19 @@ async_test(t => {
       expect_feature_unavailable_default, 'webnn');
 }, `${header} disallows cross-origin iframes despite the ${attribute}.`);
 
+
+for (const nested of [false, true]) {
+  promise_test(async t => {
+    const worker = new Worker(
+        '../resources/permissions-policy-worker.js' + (nested ? '?nested' : ''));
+    t.add_cleanup(() => worker.terminate());
+    const result = await new Promise((resolve, reject) => {
+      worker.onmessage = event => resolve(event.data);
+      worker.onerror = reject;
+    });
+    assert_equals(result, 'SecurityError');
+  }, `${header} disallows ${nested ? 'nested ' : ''}dedicated workers.`);
+}
+
 </script>
 </body>

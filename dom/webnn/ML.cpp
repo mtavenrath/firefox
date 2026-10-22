@@ -8,6 +8,7 @@
 #include "mozilla/dom/MLContext.h"
 #include "mozilla/dom/PermissionsPolicyUtils.h"
 #include "mozilla/dom/Promise.h"
+#include "mozilla/dom/WorkerPrivate.h"
 #include "nsPIDOMWindow.h"
 
 namespace mozilla::dom {
@@ -26,17 +27,25 @@ JSObject* ML::WrapObject(JSContext* aCx, JS::Handle<JSObject*> aGivenProto) {
   return ML_Binding::Wrap(aCx, this, aGivenProto);
 }
 
+static bool IsWebNNAllowed(nsIGlobalObject* aGlobal) {
+  if (!NS_IsMainThread()) {
+    WorkerPrivate* worker = GetCurrentThreadWorkerPrivate();
+    return worker && worker->WebNNAllowed();
+  }
+  nsPIDOMWindowInner* window = aGlobal->GetAsInnerWindow();
+  return window && window->GetExtantDoc() &&
+         PermissionsPolicyUtils::IsFeatureAllowed(window->GetExtantDoc(),
+                                                  u"webnn"_ns);
+}
+
 already_AddRefed<Promise> ML::CreateContext(const MLContextOptions& aOptions,
                                             ErrorResult& aRv) {
   RefPtr<Promise> promise = Promise::Create(mGlobal, aRv);
   if (aRv.Failed()) {
     return nullptr;
   }
-  // Step 3: reject when the document cannot use the webnn feature.
-  nsPIDOMWindowInner* window = mGlobal->GetAsInnerWindow();
-  if (!window || !window->GetExtantDoc() ||
-      !PermissionsPolicyUtils::IsFeatureAllowed(window->GetExtantDoc(),
-                                                u"webnn"_ns)) {
+  // Step 3: reject when the global cannot use the webnn feature.
+  if (!IsWebNNAllowed(mGlobal)) {
     promise->MaybeRejectWithSecurityError(
         "Permissions policy does not allow WebNN");
     return promise.forget();
@@ -51,11 +60,8 @@ already_AddRefed<Promise> ML::CreateContext(webgpu::Device& aDevice,
   if (aRv.Failed()) {
     return nullptr;
   }
-  // Step 3: reject when the document cannot use the webnn feature.
-  nsPIDOMWindowInner* window = mGlobal->GetAsInnerWindow();
-  if (!window || !window->GetExtantDoc() ||
-      !PermissionsPolicyUtils::IsFeatureAllowed(window->GetExtantDoc(),
-                                                u"webnn"_ns)) {
+  // Step 3: reject when the global cannot use the webnn feature.
+  if (!IsWebNNAllowed(mGlobal)) {
     promise->MaybeRejectWithSecurityError(
         "Permissions policy does not allow WebNN");
     return promise.forget();

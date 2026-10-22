@@ -7,7 +7,7 @@
  * https://webmachinelearning.github.io/webnn/
  *
  * Copied from testing/web-platform/tests/interfaces/webnn.idl, with these
- * deviations: Window only and behind dom.webnn.enabled, FrozenArray is spelled
+ * deviations: behind dom.webnn.enabled, FrozenArray is spelled
  * [Frozen, Cached, Pure] sequence, and MLNumber is unrestricted double because
  * bigint is not supported by our bindings. The MLGraphBuilder operator plumbing
  * is generated from this file, see dom/webnn/codegen.
@@ -28,7 +28,7 @@ dictionary MLContextOptions {
   boolean accelerated = true;
 };
 
-[SecureContext, Exposed=Window, Pref="dom.webnn.enabled"]
+[SecureContext, Exposed=(Window, Worker), Pref="dom.webnn.enabled"]
 interface ML {
   [NewObject]
   Promise<MLContext> createContext(optional MLContextOptions options = {});
@@ -42,7 +42,7 @@ dictionary MLContextLostInfo {
   DOMString message;
 };
 
-[SecureContext, Exposed=Window, Pref="dom.webnn.enabled"]
+[SecureContext, Exposed=(Window, Worker), Pref="dom.webnn.enabled"]
 interface MLContext {
   [Throws]
   undefined dispatch(MLGraph graph, MLNamedTensors inputs, MLNamedTensors outputs);
@@ -106,7 +106,7 @@ dictionary MLSingleInputSupportLimits {
   MLTensorLimits output;
 };
 
-[SecureContext, Exposed=Window, Pref="dom.webnn.enabled"]
+[SecureContext, Exposed=(Window, Worker), Pref="dom.webnn.enabled"]
 interface MLGraph {
   undefined destroy();
 };
@@ -132,7 +132,7 @@ dictionary MLOperandDescriptor {
   required sequence<[EnforceRange] unsigned long> shape;
 };
 
-[SecureContext, Exposed=Window, Pref="dom.webnn.enabled"]
+[SecureContext, Exposed=(Window, Worker), Pref="dom.webnn.enabled"]
 interface MLOperand {
   readonly attribute MLOperandDataType dataType;
   [Frozen, Cached, Pure]
@@ -150,7 +150,7 @@ dictionary MLTensorDescriptor : MLOperandDescriptor {
   boolean writable = false;
 };
 
-[SecureContext, Exposed=Window, Pref="dom.webnn.enabled"]
+[SecureContext, Exposed=(Window, Worker), Pref="dom.webnn.enabled"]
 interface MLTensor {
   readonly attribute MLOperandDataType dataType;
   [Frozen, Cached, Pure]
@@ -164,7 +164,7 @@ interface MLTensor {
 
 typedef record<USVString, MLOperand> MLNamedOperands;
 
-[SecureContext, Exposed=Window, Pref="dom.webnn.enabled"]
+[SecureContext, Exposed=(Window, Worker), Pref="dom.webnn.enabled"]
 interface MLGraphBuilder {
   // Construct the graph builder from the context.
   [Throws]
