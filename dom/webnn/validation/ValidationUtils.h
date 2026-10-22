@@ -26,7 +26,7 @@ namespace mozilla::webnn {
 using dom::MLOperandDataType;
 
 // Implementation-defined rank bound for "check dimensions".
-constexpr size_t kMaxRank = 8;
+constexpr size_t kMaxRank = 5;
 
 constexpr MLOperandDataType kFloatTypes[] = {MLOperandDataType::Float32,
                                              MLOperandDataType::Float16};

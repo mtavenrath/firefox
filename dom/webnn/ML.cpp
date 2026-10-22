@@ -6,7 +6,9 @@
 #include "mozilla/dom/ML.h"
 
 #include "mozilla/dom/MLContext.h"
+#include "mozilla/dom/PermissionsPolicyUtils.h"
 #include "mozilla/dom/Promise.h"
+#include "nsPIDOMWindow.h"
 
 namespace mozilla::dom {
 
@@ -30,6 +32,15 @@ already_AddRefed<Promise> ML::CreateContext(const MLContextOptions& aOptions,
   if (aRv.Failed()) {
     return nullptr;
   }
+  // Step 3: reject when the document cannot use the webnn feature.
+  nsPIDOMWindowInner* window = mGlobal->GetAsInnerWindow();
+  if (!window || !window->GetExtantDoc() ||
+      !PermissionsPolicyUtils::IsFeatureAllowed(window->GetExtantDoc(),
+                                                u"webnn"_ns)) {
+    promise->MaybeRejectWithSecurityError(
+        "Permissions policy does not allow WebNN");
+    return promise.forget();
+  }
   MLContext::Create(mGlobal, aOptions, promise);
   return promise.forget();
 }
@@ -39,6 +50,15 @@ already_AddRefed<Promise> ML::CreateContext(webgpu::Device& aDevice,
   RefPtr<Promise> promise = Promise::Create(mGlobal, aRv);
   if (aRv.Failed()) {
     return nullptr;
+  }
+  // Step 3: reject when the document cannot use the webnn feature.
+  nsPIDOMWindowInner* window = mGlobal->GetAsInnerWindow();
+  if (!window || !window->GetExtantDoc() ||
+      !PermissionsPolicyUtils::IsFeatureAllowed(window->GetExtantDoc(),
+                                                u"webnn"_ns)) {
+    promise->MaybeRejectWithSecurityError(
+        "Permissions policy does not allow WebNN");
+    return promise.forget();
   }
   promise->MaybeRejectWithNotSupportedError("WebGPU interop is not supported");
   return promise.forget();

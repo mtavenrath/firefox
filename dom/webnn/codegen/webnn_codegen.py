@@ -730,9 +730,12 @@ def op_support_limits_cpp(output, webidl, limits_json):
         ]
         for operand in operands:
             l = limits[member][operand]
+            rank_range = l["rankRange"]
+            if member == "gatherND" and operand == "input":
+                rank_range = [rank_range[0], 4]
             out.append(
                 "    op.m%s.Construct(%s);"
-                % (first_cap(operand), tensor_limits(l["dataTypes"], l["rankRange"]))
+                % (first_cap(operand), tensor_limits(l["dataTypes"], rank_range))
             )
         out.append("  }")
     out += ["}", "", "}  // namespace mozilla::webnn", ""]

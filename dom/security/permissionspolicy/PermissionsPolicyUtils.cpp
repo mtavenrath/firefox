@@ -40,6 +40,7 @@ static FeatureMap sSupportedFeatures[] = {
     {"display-capture", PermissionsPolicyUtils::PermissionsPolicyValue::eSelf},
     {"fullscreen", PermissionsPolicyUtils::PermissionsPolicyValue::eSelf},
     {"web-share", PermissionsPolicyUtils::PermissionsPolicyValue::eSelf},
+    {"webnn", PermissionsPolicyUtils::PermissionsPolicyValue::eSelf},
     {"gamepad", PermissionsPolicyUtils::PermissionsPolicyValue::eAll},
     {"publickey-credentials-create",
      PermissionsPolicyUtils::PermissionsPolicyValue::eSelf},

@@ -16,7 +16,7 @@ promise_setup(async () => {
 
 // https://www.w3.org/TR/webnn/#api-mltensor
 
-const testContents = Uint32Array.from([0, 1, 2, 3, 4, 5, 6, 7]);
+const testContents = Int32Array.from([0, 1, 2, 3, 4, 5, 6, 7]);
 
 let mlContext;
 let mlTensor;
@@ -44,6 +44,20 @@ promise_setup(async () => {
 });
 
 promise_test(async (t) => {
+  const typedArray = new Uint32Array(testContents.length);
+  assert_throws_js(
+      TypeError, () => mlContext.writeTensor(mlTensor, typedArray));
+  await promise_rejects_js(
+      t, TypeError, mlContext.readTensor(mlTensor, typedArray));
+}, `Tensor transfers reject a view with an incompatible data type`);
+
+promise_test(async () => {
+  const bytes = new Uint8Array(testContents.byteLength);
+  await mlContext.readTensor(mlTensor, bytes);
+  assert_array_equals(new Int32Array(bytes.buffer), testContents);
+}, `readTensor() accepts a generic Uint8Array view`);
+
+promise_test(async (t) => {
   const arrayBuffer = new ArrayBuffer(testContents.byteLength - 4);
 
   await promise_rejects_js(
@@ -51,7 +65,7 @@ promise_test(async (t) => {
 }, `readTensor() with an ArrayBuffer that is too small should reject`);
 
 promise_test(async (t) => {
-  const typedArray = new Uint32Array(testContents.length - 1);
+  const typedArray = new Int32Array(testContents.length - 1);
 
   await promise_rejects_js(
       t, TypeError, mlContext.readTensor(mlTensor, typedArray));
@@ -59,7 +73,7 @@ promise_test(async (t) => {
 
 promise_test(async (t) => {
   const arrayBuffer = new ArrayBuffer(testContents.byteLength);
-  const typedArray = new Uint32Array(arrayBuffer);
+  const typedArray = new Int32Array(arrayBuffer);
 
   arrayBuffer.transfer();
 
@@ -72,7 +86,7 @@ promise_test(async (t) => {
 
 promise_test(async (t) => {
   const arrayBuffer = new ArrayBuffer(testContents.byteLength);
-  const typedArray = new Uint32Array(arrayBuffer);
+  const typedArray = new Int32Array(arrayBuffer);
 
   const checks = Promise.all([
     promise_rejects_js(
@@ -91,7 +105,7 @@ promise_test(async () => {
 
   await mlContext.readTensor(mlTensor, arrayBuffer);
 
-  assert_array_equals(new Uint32Array(arrayBuffer), testContents);
+  assert_array_equals(new Int32Array(arrayBuffer), testContents);
 }, `readTensor() with an ArrayBuffer`);
 
 if ('SharedArrayBuffer' in globalThis) {
@@ -100,12 +114,12 @@ if ('SharedArrayBuffer' in globalThis) {
 
     await mlContext.readTensor(mlTensor, sharedArrayBuffer);
 
-    assert_array_equals(new Uint32Array(sharedArrayBuffer), testContents);
+    assert_array_equals(new Int32Array(sharedArrayBuffer), testContents);
   }, `readTensor() with a SharedArrayBuffer`);
 
   promise_test(async () => {
     const sharedArrayBuffer = new SharedArrayBuffer(testContents.byteLength);
-    const typedArray = new Uint32Array(sharedArrayBuffer);
+    const typedArray = new Int32Array(sharedArrayBuffer);
 
     await mlContext.readTensor(mlTensor, typedArray);
 
@@ -118,44 +132,25 @@ promise_test(async () => {
   // offset to make sure the MLTensor contents are written to the correct
   // offset.
   const arrayBuffer = new ArrayBuffer(testContents.byteLength + 4);
-  const typedArray = new Uint32Array(arrayBuffer, 4);
+  const typedArray = new Int32Array(arrayBuffer, 4);
 
   await mlContext.readTensor(mlTensor, typedArray);
 
   assert_array_equals(typedArray, testContents);
 }, `readTensor() with a TypedArray`);
 
-promise_test(async () => {
+promise_test(async (t) => {
   const arrayBuffer = new ArrayBuffer(testContents.byteLength * 2);
+  await promise_rejects_js(
+      t, TypeError, mlContext.readTensor(mlTensor, arrayBuffer));
+}, `readTensor() with a larger ArrayBuffer should reject`);
 
-  await mlContext.readTensor(mlTensor, arrayBuffer);
-
-  assert_array_equals(
-      new Uint32Array(arrayBuffer).subarray(0, testContents.length),
-      testContents);
-  // The rest of the array should remain uninitialized.
-  assert_array_equals(
-      new Uint32Array(arrayBuffer)
-          .subarray(testContents.length, testContents.length * 2),
-      new Uint32Array(testContents.length));
-}, `readTensor() with a larger ArrayBuffer`);
-
-promise_test(async () => {
-  // Create a slightly larger ArrayBuffer and set up the TypedArray at an
-  // offset to make sure the MLTensor contents are written to the correct
-  // offset.
+promise_test(async (t) => {
   const arrayBuffer = new ArrayBuffer(testContents.byteLength * 2 + 4);
-  const typedArray = new Uint32Array(arrayBuffer, 4);
-
-  await mlContext.readTensor(mlTensor, typedArray);
-
-  assert_array_equals(
-      typedArray.subarray(0, testContents.length), testContents);
-  // The rest of the array should remain uninitialized.
-  assert_array_equals(
-      typedArray.subarray(testContents.length, testContents.length * 2),
-      new Uint32Array(testContents.length));
-}, `readTensor() with a larger TypedArray`);
+  const typedArray = new Int32Array(arrayBuffer, 4);
+  await promise_rejects_js(
+      t, TypeError, mlContext.readTensor(mlTensor, typedArray));
+}, `readTensor() with a larger TypedArray should reject`);
 
 promise_test(async (t) => {
   const tensor = await mlContext.createTensor({
@@ -169,10 +164,10 @@ promise_test(async (t) => {
   // Reading a destroyed MLTensor should reject.
   tensor.destroy();
 
-  await promise_rejects_dom(
-      t, 'InvalidStateError', mlContext.readTensor(tensor, arrayBuffer));
-  await promise_rejects_dom(
-      t, 'InvalidStateError', mlContext.readTensor(tensor, arrayBufferView));
+  await promise_rejects_js(
+      t, TypeError, mlContext.readTensor(tensor, arrayBuffer));
+  await promise_rejects_js(
+      t, TypeError, mlContext.readTensor(tensor, arrayBufferView));
 }, `readTensor() rejects on a destroyed MLTensor`);
 
 promise_test(async (t) => {
