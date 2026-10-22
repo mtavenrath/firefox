@@ -56,6 +56,11 @@ const tests = [
 tests.forEach(
     test => promise_test(async t => {
       const builder = new MLGraphBuilder(context);
+      if (!context.opSupportLimits().input.dataTypes.includes(
+              test.input.dataType)) {
+        assert_throws_js(TypeError, () => builder.input('input', test.input));
+        return;
+      }
       const input = builder.input('input', test.input);
       if (test.output) {
         const output = builder.tile(input, test.repetitions, test.options);

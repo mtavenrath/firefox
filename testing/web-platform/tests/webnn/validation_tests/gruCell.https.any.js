@@ -95,10 +95,10 @@ const tests = [
   {
     name:
         '[gruCell] Throw if the data type of the inputs is not one of the floating point types',
-    input: {dataType: 'uint32', shape: kValidInputShape},
-    weight: {dataType: 'uint32', shape: kValidWeightShape},
-    recurrentWeight: {dataType: 'uint32', shape: kValidRecurrentWeightShape},
-    hiddenState: {dataType: 'uint32', shape: kValidHiddenStateShape},
+    input: {dataType: 'int32', shape: kValidInputShape},
+    weight: {dataType: 'int32', shape: kValidWeightShape},
+    recurrentWeight: {dataType: 'int32', shape: kValidRecurrentWeightShape},
+    hiddenState: {dataType: 'int32', shape: kValidHiddenStateShape},
     hiddenSize: hiddenSize
   },
   {
@@ -173,7 +173,7 @@ const tests = [
     input: kExampleInputDescriptor,
     weight: kExampleWeightDescriptor,
     recurrentWeight: kExampleRecurrentWeightDescriptor,
-    hiddenState: {dataType: 'uint32', shape: [batchSize, hiddenSize]},
+    hiddenState: {dataType: 'int32', shape: [batchSize, hiddenSize]},
     hiddenSize: hiddenSize
   },
   {

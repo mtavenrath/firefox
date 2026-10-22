@@ -56,7 +56,7 @@ tests.forEach(
     test => promise_test(async t => {
       const builder = new MLGraphBuilder(context);
       const input = builder.input('input', test.input);
-      const slope = builder.input('input', test.slope);
+      const slope = builder.input('slope', test.slope);
       if (test.output) {
         const output = builder.prelu(input, slope);
         assert_equals(output.dataType, test.output.dataType);

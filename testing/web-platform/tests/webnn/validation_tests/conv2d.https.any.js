@@ -535,7 +535,8 @@ const tests = [
     },
   },
   {
-    name: '[conv2d] Throw if the intermediate padded tensor is too large.',
+    name: '[conv2d] Large padding with a valid output shape.',
+    output: {dataType: 'float32', shape: [5354, 2, 2, 1]},
     input: {dataType: 'float32', shape: [5354, 5, 1, 33]},
     filter: {dataType: 'float32', shape: [1, 6, 1, 33]},
     options: {
@@ -550,7 +551,8 @@ const tests = [
     },
   },
   {
-    name: '[conv2d] Throw if a stride is larger than the padded input height.',
+    name: '[conv2d] A stride larger than the padded input height produces one row.',
+    output: {dataType: 'float32', shape: [1, 1, 1, 5]},
     input: {dataType: 'float32', shape: [1, 1, 5, 5]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {
@@ -559,7 +561,8 @@ const tests = [
     },
   },
   {
-    name: '[conv2d] Throw if a stride is larger than the padded input width.',
+    name: '[conv2d] A stride larger than the padded input width produces one column.',
+    output: {dataType: 'float32', shape: [1, 1, 5, 1]},
     input: {dataType: 'float32', shape: [1, 1, 5, 5]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {
@@ -569,7 +572,8 @@ const tests = [
   },
   {
     name:
-        '[conv2d] Throw if a dilation is larger than the padded input height.',
+        '[conv2d] Height dilation does not expand a unit filter.',
+    output: {dataType: 'float32', shape: [1, 1, 5, 5]},
     input: {dataType: 'float32', shape: [1, 1, 5, 5]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {
@@ -578,7 +582,8 @@ const tests = [
     },
   },
   {
-    name: '[conv2d] Throw if a dilation is larger than the padded input width.',
+    name: '[conv2d] Width dilation does not expand a unit filter.',
+    output: {dataType: 'float32', shape: [1, 1, 5, 5]},
     input: {dataType: 'float32', shape: [1, 1, 5, 5]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {

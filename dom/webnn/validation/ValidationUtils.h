@@ -48,6 +48,8 @@ constexpr MLOperandDataType kQuantizedTypes[] = {
 bool IsDataTypeIn(MLOperandDataType aType,
                   Span<const MLOperandDataType> aAllowed);
 
+bool IsSupportedDataType(MLOperandDataType aType);
+
 // Throws a TypeError of the form "[label] op: message". Control and
 // bidirectional formatting characters are stripped from the label.
 void ThrowOpTypeError(ErrorResult& aRv, const nsAString& aLabel,

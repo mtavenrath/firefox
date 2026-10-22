@@ -78,10 +78,10 @@ promise_test(async t => {
     if (!context.opSupportLimits().input.dataTypes.includes(data_type)) {
       assert_throws_js(
         TypeError,
-        () => builder.input('input', { dataType: data_type, shape: [1, 2, 3] }));
+        () => builder.input(`input_${data_type}`, { dataType: data_type, shape: [1, 2, 3] }));
       return;
     }
-    const input = builder.input('input', { dataType: data_type, shape: [1, 2, 3] });
+    const input = builder.input(`input_${data_type}`, { dataType: data_type, shape: [1, 2, 3] });
     assert_throws_js(TypeError, () => builder.clamp(input, options));
   }
 }, '[clamp] Throw if BigInt is used for data types other than int64 and uint64');

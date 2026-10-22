@@ -551,7 +551,8 @@ const tests = [
   },
   {
     name:
-        '[convTranspose2d] Throw if a stride is larger than the output height.',
+        '[convTranspose2d] Large stride with a valid output height.',
+    output: {dataType: 'float32', shape: [1, 1, 1, 1]},
     input: {dataType: 'float32', shape: [1, 1, 1, 1]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {
@@ -561,7 +562,8 @@ const tests = [
   },
   {
     name:
-        '[convTranspose2d] Throw if a stride is larger than the output width.',
+        '[convTranspose2d] Large stride with a valid output width.',
+    output: {dataType: 'float32', shape: [1, 1, 1, 1]},
     input: {dataType: 'float32', shape: [1, 1, 1, 1]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {
@@ -571,7 +573,8 @@ const tests = [
   },
   {
     name:
-        '[convTranspose2d] Throw if a dilation is larger than the output height.',
+        '[convTranspose2d] Large dilation with a valid output height.',
+    output: {dataType: 'float32', shape: [1, 1, 3, 3]},
     input: {dataType: 'float32', shape: [1, 1, 3, 3]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {
@@ -581,7 +584,8 @@ const tests = [
   },
   {
     name:
-        '[convTranspose2d] Throw if a dilation is larger than the output width.',
+        '[convTranspose2d] Large dilation with a valid output width.',
+    output: {dataType: 'float32', shape: [1, 1, 3, 3]},
     input: {dataType: 'float32', shape: [1, 1, 3, 3]},
     filter: {dataType: 'float32', shape: [1, 1, 1, 1]},
     options: {

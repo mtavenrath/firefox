@@ -50,6 +50,18 @@ impl Conv<MLDimension> for u32 {
 }
 
 fn number(value: f64) -> Result<serde_json::Value, Error> {
+    if !value.is_finite() {
+        return Ok(serde_json::Value::String(
+            if value.is_nan() {
+                "NaN"
+            } else if value.is_sign_negative() {
+                "-Infinity"
+            } else {
+                "Infinity"
+            }
+            .to_string(),
+        ));
+    }
     serde_json::Number::from_f64(value)
         .map(serde_json::Value::Number)
         .ok_or_else(|| Error::InvalidArgument(format!("unsupported number: {value}")))
@@ -105,7 +117,10 @@ unsafe fn slice<'a, T>(data: *const T, len: usize) -> Result<&'a [T], Error> {
 
 impl<E: Conv<T>, T> Conv<Vec<T>> for Slice<E> {
     fn conv(&self) -> Result<Vec<T>, Error> {
-        unsafe { slice(self.data, self.len)? }.iter().map(Conv::conv).collect()
+        unsafe { slice(self.data, self.len)? }
+            .iter()
+            .map(Conv::conv)
+            .collect()
     }
 }
 
@@ -115,7 +130,9 @@ impl<E: Conv<T>, T> Conv<Option<Vec<T>>> for OptionalSlice<E> {
             return Ok(None);
         }
         let values = unsafe { slice(self.data, self.len)? };
-        Ok(Some(values.iter().map(Conv::conv).collect::<Result<_, _>>()?))
+        Ok(Some(
+            values.iter().map(Conv::conv).collect::<Result<_, _>>()?,
+        ))
     }
 }
 

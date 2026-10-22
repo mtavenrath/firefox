@@ -310,7 +310,8 @@ function validateTwoInputsBroadcastable(operationName, label) {
         if (shape.length > 0) {
           const inputA =
               builder.input(`inputA${++inputAIndex}`, {dataType, shape});
-          const unbroadcastableShapes = generateUnbroadcastableShapes(shape);
+          const unbroadcastableShapes = generateUnbroadcastableShapes(shape)
+              .filter(candidate => candidate.length <= getGlobalRankMax());
           for (let shape of unbroadcastableShapes) {
             const inputB =
                 builder.input(`inputB${++inputBIndex}`, {dataType, shape});
@@ -533,7 +534,7 @@ function validateUnaryOperation(operationName, supportedDataTypes, label) {
         continue;
       }
       for (let shape of allWebNNShapesArray) {
-        const input = builder.input(`input`, {dataType, shape});
+        const input = builder.input(`input${++inputIndex}`, {dataType, shape});
         assert_equals(typeof builder[operationName], 'function');
         const output = builder[operationName](input);
         assert_equals(output.dataType, dataType);
@@ -555,7 +556,7 @@ function validateUnaryOperation(operationName, supportedDataTypes, label) {
         continue;
       }
       for (let shape of allWebNNShapesArray) {
-        const input = builder.input(`input`, {dataType, shape});
+        const input = builder.input(`input${++inputIndex}`, {dataType, shape});
         assert_equals(typeof builder[operationName], 'function');
         const options = {label};
         const regrexp = new RegExp('\\[' + label + '\\]');
@@ -580,7 +581,7 @@ function validateSingleInputOperation(operationName, label) {
         continue;
       }
       for (let shape of allWebNNShapesArray) {
-        const input = builder.input(`input`, {dataType, shape});
+        const input = builder.input(`input${++inputIndex}`, {dataType, shape});
         const output = builder[operationName](input);
         assert_equals(output.dataType, dataType);
         assert_array_equals(output.shape, shape);
@@ -603,7 +604,7 @@ function validateSingleInputOperation(operationName, label) {
         continue;
       }
       for (let shape of allWebNNShapesArray) {
-        const input = builder.input(`input`, {dataType, shape});
+        const input = builder.input(`input${++inputIndex}`, {dataType, shape});
         assert_equals(typeof builder[operationName], 'function');
         const options = {label};
         const regrexp = new RegExp('\\[' + label + '\\]');

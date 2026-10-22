@@ -139,3 +139,36 @@ promise_test(async () => {
   const result = new Float16Array(await mlContext.readTensor(outputTensor));
   assert_array_equals(result, Float16Array.from([1.0, 3.0, 5.0]));
 }, 'multiple scalar constants in expression - float16');
+
+
+promise_test(async t => {
+  const cases = [
+    [1 + 2 ** -11, 1],
+    [1 + 3 * 2 ** -11, 1 + 2 ** -9],
+    [2 ** -25, 0],
+    [2 ** -25 + 2 ** -50, 2 ** -24],
+    [65504, 65504],
+    [65520, Infinity],
+    [-0, -0],
+    [NaN, NaN],
+  ];
+  const builder = new MLGraphBuilder(mlContext);
+  const outputs = {};
+  const tensors = {};
+  for (let i = 0; i < cases.length; ++i) {
+    const name = `output${i}`;
+    outputs[name] = builder.cast(
+        builder.constant('float16', cases[i][0]), 'float32');
+    tensors[name] = await mlContext.createTensor(
+        {dataType: 'float32', shape: [], readable: true});
+    t.add_cleanup(() => tensors[name].destroy());
+  }
+  const graph = await builder.build(outputs);
+  t.add_cleanup(() => graph.destroy());
+  mlContext.dispatch(graph, {}, tensors);
+  for (let i = 0; i < cases.length; ++i) {
+    const actual = new Float32Array(
+        await mlContext.readTensor(tensors[`output${i}`]));
+    assert_equals(actual[0], cases[i][1], `constant float16 ${cases[i][0]}`);
+  }
+}, 'float16 scalar constants round directly with ties to even');

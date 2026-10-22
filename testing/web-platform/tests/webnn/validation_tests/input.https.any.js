@@ -56,7 +56,8 @@ const tests = [
 tests.forEach(
     test => promise_test(async t => {
       const builder = new MLGraphBuilder(context);
-      if (test.output) {
+      if (test.output && context.opSupportLimits().input.dataTypes.includes(
+              test.descriptor.dataType)) {
         const inputOperand = builder.input(test.name, test.descriptor);
         assert_equals(inputOperand.dataType, test.output.dataType);
         assert_array_equals(inputOperand.shape, test.output.shape);

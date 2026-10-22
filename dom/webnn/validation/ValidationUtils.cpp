@@ -28,6 +28,16 @@ static bool IsUnsafeLabelChar(char16_t aChar) {
          (aChar >= 0x2066 && aChar <= 0x2069);
 }
 
+bool IsSupportedDataType(MLOperandDataType aType) {
+#ifdef XP_MACOSX
+  return aType != MLOperandDataType::Int64 &&
+         aType != MLOperandDataType::Uint64 &&
+         aType != MLOperandDataType::Uint32;
+#else
+  return true;
+#endif
+}
+
 void ThrowOpTypeError(ErrorResult& aRv, const nsAString& aLabel,
                       const char* aOp, const char* aMessage) {
   nsAutoCString message;
@@ -49,7 +59,7 @@ void ThrowOpTypeError(ErrorResult& aRv, const nsAString& aLabel,
 }
 
 bool CheckDimensions(MLOperandDataType aType, Span<const uint32_t> aShape) {
-  if (aShape.Length() > kMaxRank) {
+  if (!IsSupportedDataType(aType) || aShape.Length() > kMaxRank) {
     return false;
   }
   CheckedInt<int64_t> elementCount = 1;
@@ -224,8 +234,7 @@ double CastNumber(double aX, MLOperandDataType aType) {
     case MLOperandDataType::Int32:
       return ConvertToInt(aX, 32, true);
     case MLOperandDataType::Uint32:
-      // The spec says "signed" for uint32.
-      return ConvertToInt(aX, 32, true);
+      return ConvertToInt(aX, 32, false);
     case MLOperandDataType::Int8:
       return ConvertToInt(aX, 8, true);
     case MLOperandDataType::Uint8:

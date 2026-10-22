@@ -81,28 +81,28 @@ const tests = [
   },
   {
     name: '[layerNormalization] Test with nonconsecutive axes.',
-    input: {dataType: 'float32', shape: [1, 2, 3, 4, 5, 6]},
+    input: {dataType: 'float32', shape: [1, 2, 3, 4, 5]},
     options: {
-      scale: {dataType: 'float32', shape: [2, 4, 6]},
-      bias: {dataType: 'float32', shape: [2, 4, 6]},
-      axes: [1, 3, 5],
+      scale: {dataType: 'float32', shape: [1, 3, 5]},
+      bias: {dataType: 'float32', shape: [1, 3, 5]},
+      axes: [0, 2, 4],
     },
-    output: {dataType: 'float32', shape: [1, 2, 3, 4, 5, 6]},
+    output: {dataType: 'float32', shape: [1, 2, 3, 4, 5]},
   },
   {
     name: '[layerNormalization] Test with axes in descending order.',
-    input: {dataType: 'float32', shape: [1, 2, 3, 4, 5, 6]},
+    input: {dataType: 'float32', shape: [1, 2, 3, 4, 5]},
     options: {
-      scale: {dataType: 'float32', shape: [6, 5, 4, 3, 2]},
-      bias: {dataType: 'float32', shape: [6, 5, 4, 3, 2]},
-      axes: [5, 4, 3, 2, 1]
+      scale: {dataType: 'float32', shape: [5, 4, 3, 2]},
+      bias: {dataType: 'float32', shape: [5, 4, 3, 2]},
+      axes: [4, 3, 2, 1]
     },
-    output: {dataType: 'float32', shape: [1, 2, 3, 4, 5, 6]},
+    output: {dataType: 'float32', shape: [1, 2, 3, 4, 5]},
   },
   {
     name:
         '[layerNormalization] Throw if the input data type is not one of the floating point types.',
-    input: {dataType: 'uint32', shape: [1, 2, 3, 4]},
+    input: {dataType: 'int32', shape: [1, 2, 3, 4]},
     options: {label}
   },
   {

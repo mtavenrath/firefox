@@ -484,10 +484,9 @@ static bool ValidatePool2dCommon(const char* aOp, const dom::MLOperand& aInput,
                      "windowDimensions must be positive");
     return false;
   }
-  // Per spec step 10, padding is reset to zeros when outputSizes is given.
-  std::array<uint32_t, 4> padding = {0, 0, 0, 0};
-  if (!aOptions.mOutputSizes.WasPassed() &&
-      !ResolveListOption(aOptions.mPadding, 0, padding)) {
+  // outputSizes selects floor or ceil rounding of the padded output shape.
+  std::array<uint32_t, 4> padding;
+  if (!ResolveListOption(aOptions.mPadding, 0, padding)) {
     ThrowOpTypeError(aRv, aOptions.mLabel, aOp, "padding must have 4 items");
     return false;
   }
@@ -505,12 +504,6 @@ static bool ValidatePool2dCommon(const char* aOp, const dom::MLOperand& aInput,
     if (outputSizes.Length() != 2) {
       ThrowOpTypeError(aRv, aOptions.mLabel, aOp,
                        "outputSizes must have 2 items");
-      return false;
-    }
-    // Literal reading of the spec, which looks garbled.
-    if (outputSizes[0] >= strides[0] || outputSizes[1] >= strides[1]) {
-      ThrowOpTypeError(aRv, aOptions.mLabel, aOp,
-                       "outputSizes must be smaller than strides");
       return false;
     }
   }

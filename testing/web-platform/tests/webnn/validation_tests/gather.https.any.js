@@ -13,13 +13,13 @@ const tests = [
   {
     name: '[gather] Test gather with default options and 0-D indices',
     input: {dataType: 'int32', shape: [3]},
-    indices: {dataType: 'int64', shape: []},
+    indices: {dataType: 'int32', shape: []},
     output: {dataType: 'int32', shape: []}
   },
   {
     name: '[gather] Test gather with axis = 2',
     input: {dataType: 'float32', shape: [1, 2, 3, 4]},
-    indices: {dataType: 'int64', shape: [5, 6]},
+    indices: {dataType: 'int32', shape: [5, 6]},
     axis: 2,
     output: {dataType: 'float32', shape: [1, 2, 5, 6, 4]}
   },
@@ -40,7 +40,7 @@ const tests = [
   {
     name: '[gather] TypeError is expected if the input is a scalar',
     input: {dataType: 'float16', shape: []},
-    indices: {dataType: 'int64', shape: [1]},
+    indices: {dataType: 'int32', shape: [1]},
   },
   {
     name:
@@ -67,6 +67,11 @@ tests.forEach(
     test => promise_test(async t => {
       const builder = new MLGraphBuilder(context);
       const input = builder.input('input', test.input);
+      if (!context.opSupportLimits().input.dataTypes.includes(
+              test.indices.dataType)) {
+        assert_throws_js(TypeError, () => builder.input('indices', test.indices));
+        return;
+      }
       const indices = builder.input('indices', test.indices);
 
       const options = {};
@@ -89,14 +94,14 @@ multi_builder_test(async (t, builder, otherBuilder) => {
   const inputFromOtherBuilder =
       otherBuilder.input('input', {dataType: 'float32', shape: [2, 2]});
 
-  const indices = builder.input('indices', {dataType: 'int64', shape: [2, 2]});
+  const indices = builder.input('indices', {dataType: 'int32', shape: [2, 2]});
   assert_throws_js(
       TypeError, () => builder.gather(inputFromOtherBuilder, indices));
 }, '[gather] throw if input is from another builder');
 
 multi_builder_test(async (t, builder, otherBuilder) => {
   const indicesFromOtherBuilder =
-      otherBuilder.input('indices', {dataType: 'int64', shape: [2, 2]});
+      otherBuilder.input('indices', {dataType: 'int32', shape: [2, 2]});
 
   const input = builder.input('input', {dataType: 'float32', shape: [2, 2]});
   assert_throws_js(

@@ -5,6 +5,9 @@
 
 #include "mozilla/dom/MLGraphBuilder.h"
 
+#include <cmath>
+
+#include "mozilla/Casting.h"
 #include "mozilla/ProfilerMarkers.h"
 #include "mozilla/dom/MLContext.h"
 #include "mozilla/dom/MLGraph.h"
@@ -210,9 +213,17 @@ static Span<const uint8_t> AsBytes(const T& aValue) {
 
 already_AddRefed<MLOperand> MLGraphBuilder::Constant(
     MLOperandDataType aDataType, double aValue, ErrorResult& aRv) {
+  // Step 1.
   if (!CheckState(aRv)) {
     return nullptr;
   }
+
+  if (!webnn::IsSupportedDataType(aDataType)) {
+    aRv.ThrowTypeError("Unsupported constant data type");
+    return nullptr;
+  }
+  // Step 2. Cast before encoding, including saturation and ties-to-even.
+  aValue = webnn::CastNumber(aValue, aDataType);
 
   nsTArray<uint32_t> scalar;
   switch (aDataType) {
@@ -229,11 +240,13 @@ already_AddRefed<MLOperand> MLGraphBuilder::Constant(
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Int64: {
-      int64_t value = static_cast<int64_t>(aValue);
+      int64_t value =
+          aValue >= 0x1p63 ? INT64_MAX : static_cast<int64_t>(aValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Uint64: {
-      uint64_t value = static_cast<uint64_t>(aValue);
+      uint64_t value =
+          aValue >= 0x1p64 ? UINT64_MAX : static_cast<uint64_t>(aValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Int8: {
@@ -244,11 +257,23 @@ already_AddRefed<MLOperand> MLGraphBuilder::Constant(
       uint8_t value = static_cast<uint8_t>(aValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
-    case MLOperandDataType::Float16:
-      break;
+    case MLOperandDataType::Float16: {
+      float rounded = static_cast<float>(aValue);
+      uint32_t bits = BitwiseCast<uint32_t>(rounded);
+      uint16_t sign = (bits >> 16) & 0x8000;
+      uint32_t magnitude = bits & 0x7fffffff;
+      uint16_t value;
+      if (magnitude >= 0x7f800000) {
+        value = sign | (magnitude == 0x7f800000 ? 0x7c00 : 0x7e00);
+      } else if (magnitude < 0x38800000) {
+        value = sign | uint16_t(std::ldexp(std::fabs(rounded), 24));
+      } else {
+        value = sign | uint16_t((magnitude >> 13) - 0x1c000);
+      }
+      return AddConstant(aDataType, std::move(scalar), AsBytes(value));
+    }
   }
-  aRv.ThrowNotSupportedError("float16 scalar constants are not supported yet");
-  return nullptr;
+  MOZ_CRASH("Unexpected MLOperandDataType");
 }
 
 already_AddRefed<MLOperand> MLGraphBuilder::Constant(MLTensor& aTensor,

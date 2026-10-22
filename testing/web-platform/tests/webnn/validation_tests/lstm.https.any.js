@@ -133,9 +133,9 @@ const tests = [
   {
     name:
         '[lstm] TypeError is expected if the data type is not one of the floating point types',
-    input: {dataType: 'uint32', shape: kValidInputShape},
-    weight: {dataType: 'uint32', shape: kValidWeightShape},
-    recurrentWeight: {dataType: 'uint32', shape: kValidRecurrentWeightShape},
+    input: {dataType: 'int32', shape: kValidInputShape},
+    weight: {dataType: 'int32', shape: kValidWeightShape},
+    recurrentWeight: {dataType: 'int32', shape: kValidRecurrentWeightShape},
     steps: steps,
     hiddenSize: hiddenSize
   },
@@ -227,7 +227,7 @@ const tests = [
     hiddenSize: hiddenSize,
     options: {
       initialHiddenState:
-          {dataType: 'uint64', shape: [numDirections, batchSize, hiddenSize]}
+          {dataType: 'int32', shape: [numDirections, batchSize, hiddenSize]}
     }
   },
   {

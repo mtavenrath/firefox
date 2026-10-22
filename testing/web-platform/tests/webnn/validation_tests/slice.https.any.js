@@ -88,11 +88,12 @@ const tests = [
     strides: [0, 0, 0]
   },
   {
-    name: '[slice] Throw if the stride is greater than the size to slice in the same dimension.',
+    name: '[slice] A stride greater than the slice size produces one element.',
     input: {dataType: 'float32', shape: [3, 4, 5]},
     starts: [1, 2, 3],
     sizes: [1, 1, 1],
-    strides: [1, 2, 1]
+    strides: [1, 2, 1],
+    output: {dataType: 'float32', shape: [1, 1, 1]}
   }
 ];
 
@@ -106,7 +107,7 @@ tests.forEach(
       }
 
       if (test.output) {
-        const output = builder.slice(input, test.starts, test.sizes);
+        const output = builder.slice(input, test.starts, test.sizes, options);
         assert_equals(output.dataType, test.output.dataType);
         assert_array_equals(output.shape, test.output.shape);
       } else {

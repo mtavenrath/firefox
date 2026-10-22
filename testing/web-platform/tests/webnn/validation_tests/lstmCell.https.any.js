@@ -244,7 +244,7 @@ const tests = [
   {
     name:
         '[lstmCell] Throw if the input data type is not one of the floating point types',
-    input: {dataType: 'uint32', shape: [batchSize, inputSize]},
+    input: {dataType: 'int32', shape: [batchSize, inputSize]},
     weight: {dataType: 'float32', shape: [4 * hiddenSize, inputSize]},
     recurrentWeight: {dataType: 'float32', shape: [4 * hiddenSize, hiddenSize]},
     hiddenState: {dataType: 'float32', shape: [batchSize, hiddenSize]},
@@ -329,7 +329,7 @@ const tests = [
     input: {dataType: 'float16', shape: [batchSize, inputSize]},
     weight: {dataType: 'float16', shape: [4 * hiddenSize, inputSize]},
     recurrentWeight: {dataType: 'float16', shape: [4 * hiddenSize, hiddenSize]},
-    hiddenState: {dataType: 'int64', shape: [batchSize, hiddenSize]},
+    hiddenState: {dataType: 'int32', shape: [batchSize, hiddenSize]},
     cellState: {dataType: 'float16', shape: [batchSize, hiddenSize]},
     hiddenSize: hiddenSize
   },

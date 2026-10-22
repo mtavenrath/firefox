@@ -73,7 +73,7 @@ tests.forEach(test => promise_test(async t => {
 multi_builder_test(async (t, builder, otherBuilder) => {
   const input = otherBuilder.input('input', {dataType: 'float32', shape: [8]});
   const indices = builder.input('indices', {dataType: 'int32', shape: [4, 1]});
-  const updates = builder.input('indices', {dataType: 'int32', shape: [4]});
+  const updates = builder.input('updates', {dataType: 'int32', shape: [4]});
 
   assert_throws_js(TypeError, () => builder.scatterND(input, indices, updates));
 }, '[scatterND] Throw if input is from another builder');
@@ -82,7 +82,7 @@ multi_builder_test(async (t, builder, otherBuilder) => {
   const input = builder.input('input', {dataType: 'float32', shape: [8]});
   const indices =
       otherBuilder.input('indices', {dataType: 'int32', shape: [4, 1]});
-  const updates = builder.input('indices', {dataType: 'int32', shape: [4]});
+  const updates = builder.input('updates', {dataType: 'int32', shape: [4]});
 
   assert_throws_js(TypeError, () => builder.scatterND(input, indices, updates));
 }, '[scatterND] Throw if indcies is from another builder');
@@ -91,7 +91,7 @@ multi_builder_test(async (t, builder, otherBuilder) => {
   const input = builder.input('input', {dataType: 'float32', shape: [8]});
   const indices = builder.input('indices', {dataType: 'int32', shape: [4, 1]});
   const updates =
-      otherBuilder.input('indices', {dataType: 'int32', shape: [4]});
+      otherBuilder.input('updates', {dataType: 'int32', shape: [4]});
 
   assert_throws_js(TypeError, () => builder.scatterND(input, indices, updates));
 }, '[scatterND] Throw if updates is from another builder');

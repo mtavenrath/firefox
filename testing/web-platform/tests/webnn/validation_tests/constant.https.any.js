@@ -303,6 +303,13 @@ const scalarTests = [
 tests.forEach(
     test => promise_test(async t => {
       const builder = new MLGraphBuilder(context);
+      if (!context.opSupportLimits().constant.dataTypes.includes(
+              test.descriptor.dataType)) {
+        assert_throws_js(TypeError, () => builder.constant(
+            test.descriptor, new test.buffer.type(test.buffer.byteLength /
+                test.buffer.type.BYTES_PER_ELEMENT)));
+        return;
+      }
       const buffer = new ArrayBuffer(test.buffer.byteLength);
       const bufferView = new test.buffer.type(buffer);
 
@@ -363,7 +370,8 @@ scalarTests.forEach(
     test => promise_test(async t => {
       const builder = new MLGraphBuilder(context);
 
-      if (test.output) {
+      if (test.output && context.opSupportLimits().constant.dataTypes.includes(
+              test.dataType)) {
         // Test successful case
         const constantOperand = builder.constant(test.dataType, test.value);
         assert_equals(constantOperand.dataType, test.output.dataType);

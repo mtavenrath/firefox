@@ -389,8 +389,8 @@ const testWriteTensor = (testName) => {
     // Writing data to a destroyed MLTensor should throw.
     mlTensor.destroy();
 
-    assert_throws_dom(
-        'InvalidStateError',
+    assert_throws_js(
+        TypeError,
         () => mlContext.writeTensor(
             mlTensor, new Uint8Array(sizeOfDescriptor(tensorDescriptor))));
   }, `${testName} / destroy`);
@@ -489,8 +489,7 @@ const testReadTensor = (testName) => {
     // Reading a destroyed MLTensor should reject.
     mlTensor.destroy();
 
-    await promise_rejects_dom(
-        t, 'InvalidStateError', mlContext.readTensor(mlTensor));
+    await promise_rejects_js(t, TypeError, mlContext.readTensor(mlTensor));
   }, `${testName} / read_after_destroy`);
 
   promise_test(async t => {
@@ -530,9 +529,9 @@ const testReadTensor = (testName) => {
     mlContext.writeTensor(mlTensor, Uint8Array.from([0xAA, 0xAA, 0xAA, 0xAA]));
 
     // Write over previously-written data.
-    mlContext.writeTensor(mlTensor, Uint32Array.from([0xBBBBBBBB]));
+    mlContext.writeTensor(mlTensor, Int32Array.from([0xBBBBBBBB]));
     await assert_tensor_data_equals(
-        mlContext, mlTensor, Uint32Array.from([0xBBBBBBBB]));
+        mlContext, mlTensor, Int32Array.from([0xBBBBBBBB]));
   }, `${testName} / overwrite`);
 
   promise_test(async t => {
@@ -552,7 +551,7 @@ const testReadTensor = (testName) => {
         t, TypeError, anotherMLContext.readTensor(mlTensor));
   }, `${testName} / context_mismatch`);
 
-  promise_test(async () => {
+  promise_test(async t => {
     // Create a 128k tensor to test the data pipe.
     let mlTensor = await mlContext.createTensor({
       dataType: 'int32',
@@ -560,9 +559,10 @@ const testReadTensor = (testName) => {
       readable: true,
     });
 
-    // Read to an array larger than the 128k mlTensor
+    // Reject an array larger than the 128k mlTensor
     const largeArray = new Int32Array(140000);
-    await mlContext.readTensor(mlTensor, largeArray);
+    await promise_rejects_js(
+        t, TypeError, mlContext.readTensor(mlTensor, largeArray));
   }, `${testName} / read with larger array`);
 };
 

@@ -111,9 +111,9 @@ multi_builder_test(async (t, builder, otherBuilder) => {
 
   const inputFromOtherBuilder = otherBuilder.input('input', operandDescriptor);
 
-  const input1 = builder.input('input', operandDescriptor);
-  const input2 = builder.input('input', operandDescriptor);
-  const input3 = builder.input('input', operandDescriptor);
+  const input1 = builder.input('input1', operandDescriptor);
+  const input2 = builder.input('input2', operandDescriptor);
+  const input3 = builder.input('input3', operandDescriptor);
 
   assert_throws_js(
       TypeError,

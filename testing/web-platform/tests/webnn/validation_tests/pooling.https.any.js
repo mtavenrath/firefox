@@ -297,7 +297,8 @@ const tests = [
     },
   },
   {
-    name: 'Throw if the product of window dimensions is too large',
+    name: 'Large windows with padding and a valid output shape',
+    output: {dataType: 'float16', shape: [1, 1, 1, 1]},
     input: {dataType: 'float16', shape: [1, 1, 1, 1]},
     options: {
       windowDimensions: [1000092567, 1152814792],
@@ -308,7 +309,8 @@ const tests = [
     },
   },
   {
-    name: 'Throw if a stride is larger than the padded input height.',
+    name: 'A stride larger than the padded input height produces one output element along that axis.',
+    output: {dataType: 'float32', shape: [1, 3, 1, 5]},
     input: {dataType: 'float32', shape: [1, 3, 5, 5]},
     options: {
       windowDimensions: [1, 1],
@@ -317,7 +319,8 @@ const tests = [
     },
   },
   {
-    name: 'Throw if a stride is larger than the padded input width.',
+    name: 'A stride larger than the padded input width produces one output element along that axis.',
+    output: {dataType: 'float32', shape: [1, 3, 5, 1]},
     input: {dataType: 'float32', shape: [1, 3, 5, 5]},
     options: {
       windowDimensions: [1, 1],
@@ -326,7 +329,8 @@ const tests = [
     },
   },
   {
-    name: 'Throw if a dilation is larger than the padded input height.',
+    name: 'Height dilation does not expand a unit window.',
+    output: {dataType: 'float32', shape: [1, 3, 5, 5]},
     input: {dataType: 'float32', shape: [1, 3, 5, 5]},
     options: {
       windowDimensions: [1, 1],
@@ -335,7 +339,8 @@ const tests = [
     },
   },
   {
-    name: 'Throw if a dilation is larger than the padded input width.',
+    name: 'Width dilation does not expand a unit window.',
+    output: {dataType: 'float32', shape: [1, 3, 5, 5]},
     input: {dataType: 'float32', shape: [1, 3, 5, 5]},
     options: {
       windowDimensions: [1, 1],
@@ -389,6 +394,11 @@ tests.forEach(
 ['int32', 'uint32', 'int8', 'uint8'].forEach(
     dataType => promise_test(async t => {
       const builder = new MLGraphBuilder(context);
+      if (!context.opSupportLimits().input.dataTypes.includes(dataType)) {
+        assert_throws_js(TypeError, () => builder.input(
+            'input', {dataType, shape: [1, 3, 4, 4]}));
+        return;
+      }
       const input = builder.input('input', {dataType, shape: [1, 3, 4, 4]});
       const output = builder.maxPool2d(input);
       assert_equals(output.dataType, dataType);
@@ -398,7 +408,7 @@ tests.forEach(
 promise_test(async t => {
   const builder = new MLGraphBuilder(context);
   const input =
-      builder.input('input', {dataType: 'int64', shape: [1, 2, 3, 3]});
+      builder.input('input', {dataType: 'int32', shape: [1, 2, 3, 3]});
   assert_throws_js(TypeError, () => builder.averagePool2d(input));
 }, '[averagePool2d] Throw if the input data type is not floating point');
 

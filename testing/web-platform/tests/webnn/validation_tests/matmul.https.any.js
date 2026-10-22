@@ -75,8 +75,8 @@ const tests = [
   {
     name: '[matmul] Throw if the input data type is not floating point',
     inputs: {
-      a: {dataType: 'uint32', shape: [2, 3, 4]},
-      b: {dataType: 'uint32', shape: [2, 4, 5]}
+      a: {dataType: 'int32', shape: [2, 3, 4]},
+      b: {dataType: 'int32', shape: [2, 4, 5]}
     }
   },
   {
