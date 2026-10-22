@@ -174,7 +174,8 @@ fn requires_exact_int32(graph: &GraphInfo) -> bool {
     })
 }
 
-// CoreML also loses integer bits inside the browser process with URL compilation.
+// The inference sandbox blocks MobileGestalt hardware identification, so CoreML
+// uses a cached Espresso fallback that loses int32 bits instead of BNNS.
 // Evaluate these shape-preserving kernels directly when the whole graph permits it.
 fn supports_exact_integer_execution(graph: &GraphInfo) -> bool {
     requires_exact_int32(graph)

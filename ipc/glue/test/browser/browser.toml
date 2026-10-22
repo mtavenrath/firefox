@@ -60,6 +60,9 @@ support-files = [
 
 ["browser_utility_start_clean_shutdown.js"]
 
+["browser_utility_webnn_context_loss.js"]
+run-if = ["os == 'mac'"]
+
 ["browser_zombies.js"]
 run-if = [
   "os == 'linux'",
