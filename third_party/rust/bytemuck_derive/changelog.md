@@ -1,6 +1,33 @@
 
 ## `bytemuck_derive` changelog
 
+## 1.12.1
+
+* Some derives didn't properly forward `where` clauses when applied to a struct with a `where` clause.
+
+## 1.12
+
+* Updated the `syn` version from 2 to 3. Because `syn` is not a public
+  dependency of the crate this should not cause any change to users of the
+  crate. Please report any problems. MSRV is now 1.71
+
+## 1.11
+
+* [Make derive(NoUninit) have the same constraints as Pod](https://github.com/Lokathor/bytemuck/pull/341)
+
+## 1.10.2
+
+* [Extend #[derive(TransparentWrapper)](https://github.com/Lokathor/bytemuck/pull/147)
+
+## 1.10.1
+
+* changes the derive macros to not use `transmute` size matching when checking
+  fof padding in a type. instead, an actual assert is used in a const block.
+
+## 1.10.0
+
+* add support for deriving NoUninit on enums with fields.
+
 ## 1.9.2
 
 * Removes the `resolver` key from the manifest. This breaks the build

@@ -74,7 +74,7 @@ parakeet_capi_transcribe_pcm_batch_lang
 parakeet_capi_transcribe_pcm_lang
 parakeet_capi_weights_bytes
 #endif
-#ifdef XP_MACOSX
+#ifndef ANDROID
 webnn_context_create
 webnn_context_create_tensor
 webnn_context_destroy

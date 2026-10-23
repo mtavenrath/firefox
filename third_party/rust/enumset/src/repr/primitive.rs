@@ -1,5 +1,10 @@
 use crate::repr::EnumSetTypeRepr;
 
+pub trait Primitive {
+    fn leading_zeros(&self) -> u32;
+    fn trailing_zeros(&self) -> u32;
+}
+
 macro_rules! prim {
     ($name:ty, $width:expr, $preferred_array_len:expr) => {
         const _: () = {
@@ -37,14 +42,6 @@ macro_rules! prim {
                 fn count_ones(&self) -> u32 {
                     (*self).count_ones()
                 }
-                #[inline(always)]
-                fn leading_zeros(&self) -> u32 {
-                    (*self).leading_zeros()
-                }
-                #[inline(always)]
-                fn trailing_zeros(&self) -> u32 {
-                    (*self).trailing_zeros()
-                }
 
                 #[inline(always)]
                 fn and_not(&self, other: Self) -> Self {
@@ -52,6 +49,7 @@ macro_rules! prim {
                 }
 
                 type Iter = PrimitiveIter<Self>;
+                #[inline]
                 fn iter(self) -> Self::Iter {
                     PrimitiveIter(self)
                 }
@@ -107,52 +105,52 @@ macro_rules! prim {
                 }
 
                 #[inline(always)]
-                fn from_u8_opt(v: u8) -> Option<Self> {
+                fn try_from_u8(v: u8) -> Option<Self> {
                     v.try_into().ok()
                 }
                 #[inline(always)]
-                fn from_u16_opt(v: u16) -> Option<Self> {
+                fn try_from_u16(v: u16) -> Option<Self> {
                     v.try_into().ok()
                 }
                 #[inline(always)]
-                fn from_u32_opt(v: u32) -> Option<Self> {
+                fn try_from_u32(v: u32) -> Option<Self> {
                     v.try_into().ok()
                 }
                 #[inline(always)]
-                fn from_u64_opt(v: u64) -> Option<Self> {
+                fn try_from_u64(v: u64) -> Option<Self> {
                     v.try_into().ok()
                 }
                 #[inline(always)]
-                fn from_u128_opt(v: u128) -> Option<Self> {
+                fn try_from_u128(v: u128) -> Option<Self> {
                     v.try_into().ok()
                 }
                 #[inline(always)]
-                fn from_usize_opt(v: usize) -> Option<Self> {
+                fn try_from_usize(v: usize) -> Option<Self> {
                     v.try_into().ok()
                 }
 
                 #[inline(always)]
-                fn to_u8_opt(&self) -> Option<u8> {
+                fn try_to_u8(&self) -> Option<u8> {
                     (*self).try_into().ok()
                 }
                 #[inline(always)]
-                fn to_u16_opt(&self) -> Option<u16> {
+                fn try_to_u16(&self) -> Option<u16> {
                     (*self).try_into().ok()
                 }
                 #[inline(always)]
-                fn to_u32_opt(&self) -> Option<u32> {
+                fn try_to_u32(&self) -> Option<u32> {
                     (*self).try_into().ok()
                 }
                 #[inline(always)]
-                fn to_u64_opt(&self) -> Option<u64> {
+                fn try_to_u64(&self) -> Option<u64> {
                     (*self).try_into().ok()
                 }
                 #[inline(always)]
-                fn to_u128_opt(&self) -> Option<u128> {
+                fn try_to_u128(&self) -> Option<u128> {
                     (*self).try_into().ok()
                 }
                 #[inline(always)]
-                fn to_usize_opt(&self) -> Option<usize> {
+                fn try_to_usize(&self) -> Option<usize> {
                     (*self).try_into().ok()
                 }
 
@@ -168,7 +166,7 @@ macro_rules! prim {
                     array
                 }
                 #[inline(always)]
-                fn to_u64_array_opt<const O: usize>(&self) -> Option<[u64; O]> {
+                fn try_to_u64_array<const O: usize>(&self) -> Option<[u64; O]> {
                     if O == 0 && *self != 0 {
                         None
                     } else if O == 1 && hi(*self) != 0 {
@@ -189,18 +187,21 @@ macro_rules! prim {
                     }
                 }
                 #[inline(always)]
-                fn from_u64_array_opt<const O: usize>(v: [u64; O]) -> Option<Self> {
+                fn try_from_u64_array<const O: usize>(v: [u64; O]) -> Option<Self> {
                     if O == 0 {
                         Some(0)
                     } else if O == 1 {
-                        Self::from_u64_opt(v[0])
+                        Self::try_from_u64(v[0])
                     } else {
+                        if $preferred_array_len == 1 && v[1] != 0 {
+                            return None;
+                        }
                         for i in 2..O {
                             if v[i] != 0 {
                                 return None;
                             }
                         }
-                        Self::from_u128_opt(v[0] as u128 | ((v[1] as u128) << 64))
+                        Self::try_from_u128(v[0] as u128 | ((v[1] as u128) << 64))
                     }
                 }
 
@@ -217,8 +218,7 @@ macro_rules! prim {
                     }
                 }
                 #[inline(always)]
-                #[must_use]
-                fn to_u64_slice_opt(&self, out: &mut [u64]) -> Option<()> {
+                fn try_to_u64_slice(&self, out: &mut [u64]) -> Option<()> {
                     if out.len() == 0 && *self != 0 {
                         None
                     } else if out.len() == 1 && hi(*self) != 0 {
@@ -240,19 +240,29 @@ macro_rules! prim {
                     }
                 }
                 #[inline(always)]
-                fn from_u64_slice_opt(v: &[u64]) -> Option<Self> {
+                fn try_from_u64_slice(v: &[u64]) -> Option<Self> {
                     if v.len() == 0 {
                         Some(0)
                     } else if v.len() == 1 {
-                        Self::from_u64_opt(v[0])
+                        Self::try_from_u64(v[0])
                     } else {
                         for i in 2..v.len() {
                             if v[i] != 0 {
                                 return None;
                             }
                         }
-                        Self::from_u128_opt(v[0] as u128 | ((v[1] as u128) << 64))
+                        Self::try_from_u128(v[0] as u128 | ((v[1] as u128) << 64))
                     }
+                }
+            }
+            impl Primitive for $name {
+                #[inline(always)]
+                fn leading_zeros(&self) -> u32 {
+                    (*self).leading_zeros()
+                }
+                #[inline(always)]
+                fn trailing_zeros(&self) -> u32 {
+                    (*self).trailing_zeros()
                 }
             }
         };
@@ -266,9 +276,9 @@ prim!(u128, 128, 2);
 
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
-pub struct PrimitiveIter<T: EnumSetTypeRepr>(pub T);
+pub struct PrimitiveIter<T: EnumSetTypeRepr + Primitive>(pub T);
 
-impl<T: EnumSetTypeRepr> Iterator for PrimitiveIter<T> {
+impl<T: EnumSetTypeRepr + Primitive> Iterator for PrimitiveIter<T> {
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -287,7 +297,7 @@ impl<T: EnumSetTypeRepr> Iterator for PrimitiveIter<T> {
     }
 }
 
-impl<T: EnumSetTypeRepr> DoubleEndedIterator for PrimitiveIter<T> {
+impl<T: EnumSetTypeRepr + Primitive> DoubleEndedIterator for PrimitiveIter<T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.0.is_empty() {
             None
@@ -298,3 +308,5 @@ impl<T: EnumSetTypeRepr> DoubleEndedIterator for PrimitiveIter<T> {
         }
     }
 }
+
+impl<T: EnumSetTypeRepr + Primitive> ExactSizeIterator for PrimitiveIter<T> {}

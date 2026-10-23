@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.60.0"
+edition = "2024"
+rust-version = "1.85.0"
 name = "oneshot"
-version = "0.1.13"
+version = "0.2.1"
 authors = ["Linus Färnstrand <faern@faern.net>"]
 build = false
 autolib = false
@@ -49,10 +49,6 @@ rustdoc-args = [
 
 [features]
 async = []
-default = [
-    "std",
-    "async",
-]
 std = []
 
 [lib]
@@ -146,12 +142,34 @@ features = [
 ]
 
 [target."cfg(criterion)".dev-dependencies.criterion]
-version = "0.5.1"
+version = "0.8.1"
 
 [target."cfg(oneshot_loom)".dependencies.loom]
 version = "0.7.2"
 features = ["futures"]
 optional = true
+
+[lints.clippy]
+allow_attributes = "warn"
+as_ptr_cast_mut = "warn"
+as_underscore = "warn"
+borrow_as_ptr = "warn"
+implicit_clone = "warn"
+undocumented_unsafe_blocks = "warn"
+unicode_not_nfc = "warn"
+unused_async = "deny"
+wildcard_dependencies = "deny"
+wildcard_imports = "warn"
+
+[lints.rust]
+absolute_paths_not_starting_with_crate = "deny"
+explicit_outlives_requirements = "warn"
+macro_use_extern_crate = "deny"
+missing_abi = "deny"
+non_ascii_idents = "forbid"
+single_use_lifetimes = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
 
 [lints.rust.unexpected_cfgs]
 level = "deny"

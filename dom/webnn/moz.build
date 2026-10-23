@@ -7,7 +7,7 @@
 with Files("**"):
     BUG_COMPONENT = ("Core", "DOM: Core & HTML")
 
-if CONFIG["OS_ARCH"] == "Darwin":
+if CONFIG["OS_TARGET"] != "Android":
     DIRS += ["engine"]
 
 # The operator plumbing is generated from WebNN.webidl, see codegen/.
@@ -20,7 +20,7 @@ generated = {
     "WebNNIPCUtils.h": "ipc_enum_traits",
     "WebNNValidation.h": "validation_header",
 }
-if CONFIG["OS_ARCH"] == "Darwin":
+if CONFIG["OS_TARGET"] != "Android":
     generated["WebNNParentOps.cpp"] = "parent_cpp"
 for output, function in generated.items():
     GENERATED_FILES += [output]
@@ -79,7 +79,7 @@ SOURCES += [
     "!WebNNOpSupportLimits.cpp",
 ]
 
-if CONFIG["OS_ARCH"] == "Darwin":
+if CONFIG["OS_TARGET"] != "Android":
     SOURCES += [
         "!WebNNParentOps.cpp",
     ]

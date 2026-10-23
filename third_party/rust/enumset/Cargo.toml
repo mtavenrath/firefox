@@ -11,20 +11,28 @@
 
 [package]
 edition = "2021"
+rust-version = "1.71"
 name = "enumset"
-version = "1.1.2"
-authors = ["Alissa Rao <lymia@lymiahugs.com>"]
+version = "1.1.14"
+authors = ["Alissa Rao <aura@aura.moe>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "A library for creating compact sets of enums."
 documentation = "https://docs.rs/enumset/"
 readme = "README.md"
 keywords = [
     "enum",
     "bitset",
+    "flags",
+    "bitflags",
 ]
 categories = ["data-structures"]
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Lymia/enumset"
-resolver = "1"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -33,45 +41,36 @@ rustdoc-args = [
     "docsrs",
 ]
 
-[dependencies.enumset_derive]
-version = "0.8.0"
-
-[dependencies.serde2]
-version = "1"
-optional = true
-default-features = false
-package = "serde"
-
-[dev-dependencies.bincode]
-version = "1"
-features = ["i128"]
-
-[dev-dependencies.rustversion]
-version = "1"
-
-[dev-dependencies.serde_derive]
-version = "1"
-
-[dev-dependencies.serde_json]
-version = "1"
-
-[dev-dependencies.trybuild]
-version = "1"
-
-[features]
-alloc = []
-serde = [
-    "serde2",
-    "enumset_derive/serde",
-]
-std = [
-    "alloc",
-    "enumset_derive/proc-macro-crate",
-]
-
 [badges.maintenance]
 status = "actively-developed"
 
 [badges.travis-ci]
 branch = "master"
 repository = "Lymia/enumset"
+
+[features]
+alloc = []
+proc-macro-crate = ["enumset_derive/proc-macro-crate"]
+serde2 = ["enumset_derive/serde2_deprecation_warning"]
+std = [
+    "alloc",
+    "enumset_derive/proc-macro-crate",
+    "enumset_derive/std_deprecation_warning",
+]
+
+[lib]
+name = "enumset"
+path = "src/lib.rs"
+
+[dependencies.defmt]
+version = "1"
+optional = true
+
+[dependencies.enumset_derive]
+version = "0.15.0"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+default-features = false

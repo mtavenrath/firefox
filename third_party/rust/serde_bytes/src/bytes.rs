@@ -23,13 +23,19 @@ use serde::ser::{Serialize, Serializer};
 ///
 /// use serde_bytes::Bytes;
 ///
-/// fn print_encoded_cache() -> bincode::Result<()> {
+/// fn print_encoded_cache() -> Result<(), bincode::error::EncodeError> {
 ///     let mut cache = HashMap::new();
 ///     cache.insert(3, Bytes::new(b"three"));
 ///     cache.insert(2, Bytes::new(b"two"));
 ///     cache.insert(1, Bytes::new(b"one"));
 ///
-///     bincode::serialize_into(&mut io::stdout(), &cache)
+///     bincode::serde::encode_into_std_write(
+///         &cache,
+///         &mut io::stdout(),
+///         bincode::config::standard(),
+///     )?;
+///
+///     Ok(())
 /// }
 /// #
 /// # fn main() {
@@ -37,7 +43,7 @@ use serde::ser::{Serialize, Serializer};
 /// # }
 /// ```
 #[derive(Eq, Ord)]
-#[cfg_attr(not(doc), repr(transparent))]
+#[repr(transparent)]
 pub struct Bytes {
     bytes: [u8],
 }
@@ -81,6 +87,12 @@ impl DerefMut for Bytes {
     }
 }
 
+impl<'a> From<&'a [u8]> for &'a Bytes {
+    fn from(bytes: &'a [u8]) -> Self {
+        Bytes::new(bytes)
+    }
+}
+
 #[cfg(any(feature = "std", feature = "alloc"))]
 impl ToOwned for Bytes {
     type Owned = ByteBuf;
@@ -97,7 +109,7 @@ impl From<Box<[u8]>> for Box<Bytes> {
     }
 }
 
-impl<'a> Default for &'a Bytes {
+impl Default for &Bytes {
     fn default() -> Self {
         Bytes::new(&[])
     }

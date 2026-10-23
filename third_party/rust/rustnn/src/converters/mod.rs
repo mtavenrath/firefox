@@ -10,11 +10,17 @@
 #![doc = include_str!("../../docs/development/converters.md")]
 
 use std::collections::HashMap;
+#[cfg(feature = "burn-runtime-cpu")]
+mod burn;
+#[cfg(feature = "burn-runtime-cpu")]
+pub use burn::BurnConverter;
 
 use crate::error::GraphError;
 use crate::graph::GraphInfo;
 
+mod coreml_constant_fold;
 mod coreml_mlprogram;
+pub(crate) mod coreml_names;
 #[cfg(feature = "litert-runtime")]
 pub mod litert;
 #[cfg(feature = "onnx")]
@@ -39,8 +45,22 @@ mod trtx_rnn;
 pub mod webnn;
 mod weight_file_builder;
 
+#[cfg(all(
+    feature = "coreml-runtime",
+    any(target_os = "macos", target_os = "ios", test)
+))]
+pub(crate) use coreml_mlprogram::CoremlConstantCopies;
 pub use coreml_mlprogram::CoremlMlProgramConverter;
-pub use coreml_mlprogram::coreml_feature_name;
+#[cfg(feature = "coreml-runtime")]
+pub(crate) use coreml_mlprogram::CoremlPassthrough;
+#[cfg(all(
+    feature = "coreml-runtime",
+    any(target_os = "macos", target_os = "ios")
+))]
+pub(crate) use coreml_mlprogram::{
+    INPUT_ALIASES_METADATA_KEY, OUTPUT_ALIASES_METADATA_KEY, OUTPUT_CONSTANT_COPIES_METADATA_KEY,
+    OUTPUT_PASSTHROUGHS_METADATA_KEY,
+};
 #[cfg(feature = "litert-runtime")]
 pub use litert::LiteRtConverter;
 #[cfg(feature = "onnx")]
@@ -48,6 +68,11 @@ pub use onnx::OnnxConverter;
 #[cfg(any(feature = "trtx-runtime-mock", feature = "trtx-runtime"))]
 pub use trtx::TrtxConverter;
 pub(crate) use weight_file_builder::WeightFileBuilder;
+#[cfg(all(
+    feature = "coreml-runtime",
+    any(target_os = "macos", target_os = "ios", test)
+))]
+pub(crate) use weight_file_builder::weight_ranges;
 
 #[cfg(any(feature = "cann-runtime", feature = "cann-runtime-mock"))]
 pub mod cann;
@@ -62,9 +87,8 @@ pub const ONNX_EXTERNAL_WEIGHTS_FILENAME: &str = "rustnn_external_weights.data";
 
 /// Get operand name for an operand ID, or generate a default name
 ///
-/// Shared by the converters whose formats accept arbitrary names. CoreML
-/// identifiers are restricted, see [`coreml_feature_name`].
-#[cfg(any(feature = "onnx", feature = "webnn-runtime"))]
+/// This is a shared helper used by all converters to ensure consistent
+/// operand naming across different backend formats.
 pub(crate) fn operand_name(graph: &GraphInfo, id: u32) -> String {
     graph
         .operand(id)
@@ -106,6 +130,8 @@ impl ConverterRegistry {
         };
         #[cfg(feature = "onnx")]
         registry.register(Box::new(OnnxConverter));
+        #[cfg(feature = "burn-runtime-cpu")]
+        registry.register(Box::new(BurnConverter));
         registry.register(Box::new(CoremlMlProgramConverter));
         #[cfg(any(feature = "trtx-runtime-mock", feature = "trtx-runtime"))]
         registry.register(Box::new(TrtxConverter::new()));
@@ -189,7 +215,6 @@ mod tests {
             output_operands: vec![],
             operations: vec![],
             constant_operand_ids_to_handles: Default::default(),
-            id_to_constant_tensor_operand_map: Default::default(),
             quantized: false,
         };
 
@@ -228,7 +253,6 @@ mod tests {
             output_operands: vec![],
             operations: vec![],
             constant_operand_ids_to_handles: Default::default(),
-            id_to_constant_tensor_operand_map: Default::default(),
             quantized: false,
         };
 
@@ -260,7 +284,6 @@ mod tests {
             output_operands: vec![],
             operations: vec![],
             constant_operand_ids_to_handles: Default::default(),
-            id_to_constant_tensor_operand_map: Default::default(),
             quantized: false,
         };
 
@@ -270,7 +293,6 @@ mod tests {
         registry.convert("Dummy", &graph).unwrap();
     }
 
-    #[cfg(any(feature = "onnx", feature = "webnn-runtime"))]
     #[test]
     fn test_operand_name_with_named_operand() {
         let graph = GraphInfo {
@@ -287,7 +309,6 @@ mod tests {
             output_operands: vec![],
             operations: vec![],
             constant_operand_ids_to_handles: Default::default(),
-            id_to_constant_tensor_operand_map: Default::default(),
             quantized: false,
         };
 
@@ -295,7 +316,6 @@ mod tests {
         assert_eq!(name, "input_tensor");
     }
 
-    #[cfg(any(feature = "onnx", feature = "webnn-runtime"))]
     #[test]
     fn test_operand_name_with_unnamed_operand() {
         let graph = GraphInfo {
@@ -312,7 +332,6 @@ mod tests {
             output_operands: vec![],
             operations: vec![],
             constant_operand_ids_to_handles: Default::default(),
-            id_to_constant_tensor_operand_map: Default::default(),
             quantized: false,
         };
 
@@ -320,7 +339,6 @@ mod tests {
         assert_eq!(name, "operand_0");
     }
 
-    #[cfg(any(feature = "onnx", feature = "webnn-runtime"))]
     #[test]
     fn test_operand_name_invalid_id() {
         let graph = GraphInfo {
@@ -329,7 +347,6 @@ mod tests {
             output_operands: vec![],
             operations: vec![],
             constant_operand_ids_to_handles: Default::default(),
-            id_to_constant_tensor_operand_map: Default::default(),
             quantized: false,
         };
 
@@ -367,7 +384,6 @@ mod tests {
             output_operands: vec![],
             operations: vec![],
             constant_operand_ids_to_handles: Default::default(),
-            id_to_constant_tensor_operand_map: Default::default(),
             quantized: false,
         };
 

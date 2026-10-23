@@ -1,11 +1,11 @@
 use crate::repr::EnumSetTypeRepr;
 
 #[cfg(feature = "serde")]
-use {crate::EnumSet, serde2 as serde};
+use crate::EnumSet;
 
 /// The trait used to define enum types that may be used with [`EnumSet`].
 ///
-/// This trait must be impelmented using `#[derive(EnumSetType)]`, is not public API, and its
+/// This trait must be implemented using `#[derive(EnumSetType)]`, is not public API, and its
 /// internal structure may change at any time with no warning.
 ///
 /// For full documentation on the procedural derive and its options, see
@@ -22,7 +22,7 @@ pub unsafe trait EnumSetType: Copy + Eq + EnumSetTypePrivate {}
 ///
 /// For any type `T` that implements this trait, the in-memory representation of `EnumSet<T>`
 /// is guaranteed to be `Repr`. This guarantee is useful for FFI. See [the `EnumSet` documentation
-/// under “FFI, Safety and `repr`”][crate::set::EnumSet#ffi-safety-and-repr] for an example.
+/// under “FFI, Safety and `repr`”][crate::set::EnumSet#ffi-safety] for an example.
 ///
 /// [`EnumSet`]: crate::set::EnumSet
 pub unsafe trait EnumSetTypeWithRepr:
@@ -33,7 +33,7 @@ pub unsafe trait EnumSetTypeWithRepr:
 }
 
 /// The actual members of EnumSetType. Put here to avoid polluting global namespaces.
-pub unsafe trait EnumSetTypePrivate {
+pub unsafe trait EnumSetTypePrivate: EnumSetConstHelper + Sized {
     /// The underlying type used to store the bitset.
     type Repr: EnumSetTypeRepr;
     /// A mask of bits that are valid in the bitset.
@@ -45,8 +45,15 @@ pub unsafe trait EnumSetTypePrivate {
 
     /// Converts an enum of this type into its bit position.
     fn enum_into_u32(self) -> u32;
+
     /// Converts a bit position into an enum value.
     unsafe fn enum_from_u32(val: u32) -> Self;
+
+    /// Converts a bit position into an enum value, with a debug_assert.
+    unsafe fn enum_from_u32_checked(val: u32) -> Self {
+        debug_assert!(Self::ALL_BITS.has_bit(val), "Unknown bit retrieved from bitset.");
+        Self::enum_from_u32(val)
+    }
 
     /// Serializes the `EnumSet`.
     ///
@@ -59,4 +66,17 @@ pub unsafe trait EnumSetTypePrivate {
     #[cfg(feature = "serde")]
     fn deserialize<'de, D: serde::Deserializer<'de>>(de: D) -> Result<EnumSet<Self>, D::Error>
     where Self: EnumSetType;
+}
+
+/// Retrieves a helper type for constant time operations on `EnumSet`s.
+pub unsafe trait EnumSetConstHelper {
+    /// A helper type used to convert values to EnumSets at compile-time.
+    type ConstInitHelper;
+    /// The instance of the `ConstInitHelper`.
+    const CONST_INIT_HELPER: Self::ConstInitHelper;
+
+    /// A helper type used to implement compile-time operations on enums.
+    type ConstOpHelper;
+    /// The instance of the `ConstOpHelper`.
+    const CONST_OP_HELPER: Self::ConstOpHelper;
 }

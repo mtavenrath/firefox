@@ -24,18 +24,28 @@
 //!
 //!     #[serde(with = "serde_bytes")]
 //!     byte_buf: Vec<u8>,
+//!
+//!     #[serde(with = "serde_bytes")]
+//!     byte_array: [u8; 314],
 //! }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/serde_bytes/0.11.9")]
+#![doc(html_root_url = "https://docs.rs/serde_bytes/0.11.19")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
 #![allow(
+    clippy::elidable_lifetime_names,
+    clippy::into_iter_without_iter,
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
-    clippy::needless_doctest_main
+    clippy::needless_doctest_main,
+    clippy::needless_lifetimes,
+    clippy::ptr_as_ptr
 )]
 
+extern crate serde_core as serde;
+
+mod bytearray;
 mod bytes;
 mod de;
 mod ser;
@@ -46,11 +56,9 @@ mod bytebuf;
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-#[cfg(any(feature = "std", feature = "alloc"))]
-use serde::Deserializer;
+use serde::{Deserializer, Serializer};
 
-use serde::Serializer;
-
+pub use crate::bytearray::ByteArray;
 pub use crate::bytes::Bytes;
 pub use crate::de::Deserialize;
 pub use crate::ser::Serialize;
@@ -76,6 +84,9 @@ pub use crate::bytebuf::ByteBuf;
 ///
 ///     #[serde(with = "serde_bytes")]
 ///     byte_buf: Vec<u8>,
+///
+///     #[serde(with = "serde_bytes")]
+///     byte_array: [u8; 314],
 /// }
 /// ```
 pub fn serialize<T, S>(bytes: &T, serializer: S) -> Result<S::Ok, S::Error>
@@ -101,9 +112,11 @@ where
 /// struct Packet {
 ///     #[serde(with = "serde_bytes")]
 ///     payload: Vec<u8>,
+///
+///     #[serde(with = "serde_bytes")]
+///     byte_array: [u8; 314],
 /// }
 /// ```
-#[cfg(any(feature = "std", feature = "alloc"))]
 pub fn deserialize<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
     T: Deserialize<'de>,

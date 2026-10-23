@@ -3,7 +3,7 @@ name = "libloading"
 # When bumping
 # * Don’t forget to add an entry to `src/changelog.rs`
 # * If bumping to an incompatible version, adjust the documentation in `src/lib.rs`
-version = "0.8.6"
+version = "0.9.0"
 authors = ["Simonas Kazlauskas <libloading@kazlauskas.me>"]
 license = "ISC"
 repository = "https://github.com/nagisa/rust_libloading/"
@@ -12,14 +12,18 @@ readme = "README.mkd"
 description = "Bindings around the platform's dynamic library loading primitives with greatly improved memory safety."
 keywords = ["dlopen", "load", "shared", "dylib"]
 categories = ["api-bindings"]
-rust-version = "1.56.0"
-edition = "2015"
+rust-version = "1.88.0"
+edition = "2021"
 
-[target.'cfg(windows)'.dependencies.windows-targets]
-version = ">=0.48, <0.53"
+[features]
+default = ["std"]
+std = []
+
+[target.'cfg(windows)'.dependencies.windows-link]
+version = "0.2"
 
 [target.'cfg(windows)'.dev-dependencies.windows-sys]
-version = ">=0.52,<0.59"
+version = "0.61"
 features = ["Win32_Foundation"]
 
 [target.'cfg(unix)'.dependencies.cfg-if]
@@ -34,4 +38,7 @@ all-features = true
 rustdoc-args = ["--cfg", "libloading_docs"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(libloading_docs)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(libloading_docs)',
+    'cfg(target_os, values("cygwin"))',
+] }

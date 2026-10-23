@@ -1,6 +1,6 @@
 [package]
 name = "oneshot"
-version = "0.1.13"
+version = "0.2.1"
 authors = ["Linus Färnstrand <faern@faern.net>"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -13,17 +13,19 @@ both thread blocking receive operations as well as Future based async polling.
 repository = "https://github.com/faern/oneshot"
 keywords = ["oneshot", "spsc", "async", "sync", "channel"]
 categories = ["asynchronous", "concurrency"]
-edition = "2021"
-rust-version = "1.60.0"
+edition = "2024"
+rust-version = "1.85.0"
 
 [features]
-# TODO: Remove the default features on next breaking release and make them opt-in.
-# Because default features are evil
-default = ["std", "async"]
+# None of the features are on by default, by design. Default features is an anti-pattern.
+# Since most people pull in dependencies without carefully inspecting the dependency or
+# feature list, they accidentally pull in unnecessary complexity and sometimes even
+# dependencies. By making everything opt-in, we avoid this problem. Opting in to a feature
+# is so simple in Cargo anyway, and makes it more explicit what functionality it uses.
 
 # Enables usage of libstd. Adds support for thread blocking receive methods.
 std = []
-# Enables async receiving by implementing Future
+# Enables async receiving via the AsyncReceiver receiver
 async = []
 
 # Only used for internal correctness testing.
@@ -40,13 +42,32 @@ async-std = { version = "1", features = ["attributes"] }
 # pulled in during `cargo test` runs. Mostly because criterion has a much higher MSRV than
 # this library, so it becomes impossible to run `cargo test` on the MSRV compiler without
 # this hack.
-# To run benchmarks, run with `RUSTFLAGS="--cfg criterion" cargo bench`
+# To run benchmarks, run with `RUSTFLAGS="--cfg criterion" cargo bench --all-features`
 [target.'cfg(criterion)'.dev-dependencies]
-criterion = "0.5.1"
+criterion = "0.8.1"
 
+[lints.clippy]
+allow_attributes = "warn"
+as_ptr_cast_mut = "warn"
+as_underscore = "warn"
+borrow_as_ptr = "warn"
+implicit_clone = "warn"
+undocumented_unsafe_blocks = "warn"
+unicode_not_nfc = "warn"
+unused_async = "deny"
+wildcard_dependencies = "deny"
+wildcard_imports = "warn"
 
 [lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(oneshot_loom)', 'cfg(oneshot_test_delay)', 'cfg(criterion)'] }
+absolute_paths_not_starting_with_crate = "deny"
+explicit_outlives_requirements = "warn"
+macro_use_extern_crate = "deny"
+missing_abi = "deny"
+non_ascii_idents = "forbid"
+single_use_lifetimes = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
 
 [[bench]]
 name = "benches"

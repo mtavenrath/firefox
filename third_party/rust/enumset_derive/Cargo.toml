@@ -11,25 +11,37 @@
 
 [package]
 edition = "2021"
+rust-version = "1.71"
 name = "enumset_derive"
-version = "0.8.1"
-authors = ["Alissa Rao <lymia@lymiahugs.com>"]
+version = "0.15.0"
+authors = ["Alissa Rao <aura@aura.moe>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "An internal helper crate for enumset. Not public API."
-documentation = "https://lymia.moe/doc/enumset/enumset/"
+documentation = "https://docs.rs/enumset_derive/latest/enumset_derive/"
 readme = "README.md"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Lymia/enumset"
-resolver = "1"
+
+[features]
+serde2_deprecation_warning = []
+std_deprecation_warning = []
 
 [lib]
+name = "enumset_derive"
+path = "src/lib.rs"
 proc-macro = true
 
 [dependencies.darling]
-version = "0.20"
+version = "0.21.3"
 default-features = false
 
 [dependencies.proc-macro-crate]
-version = "1"
+version = "3"
 optional = true
 
 [dependencies.proc-macro2]
@@ -40,6 +52,3 @@ version = "1"
 
 [dependencies.syn]
 version = "2"
-
-[features]
-serde = []

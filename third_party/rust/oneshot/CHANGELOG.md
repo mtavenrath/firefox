@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 
+## [0.2.1] - 2026-02-23
+### Added
+- Add `is_closed` and `has_message` methods to `AsyncReceiver`.
+
+
+## [0.2.0] - 2026-02-23
+### Changed
+- Disable both the `std` and `async` features by default. Making them opt-in instead of opt-out.
+  This makes the library more minimal by default and only contains the functionality that the
+  user explicitly enables. This is a breaking change.
+- Upgrade to Rust 2024 edition. This also bumps the MSRV to 1.85.0
+- Add a separate type `AsyncReceiver` that implements `Future` instead of implementing it
+  directly on the `Receiver` type. Now the `Receiver` implements `IntoFuture` instead.
+  This is a breaking change. This change removes the possible panics in many recv* methods,
+  and it simplifies some code a bit.
+
+### Fixed
+- Make Debug impl on SendError include the channel message type, instead of just saying
+  `"SendError<T>(_)"`.
+
+
 ## [0.1.13] - 2026-01-26
 ### Fixed
 - Fix documentation building on docs.rs by not using removed `doc_auto_cfg` feature.
@@ -25,7 +46,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [0.1.12] - 2026-01-25
 ### Fixed
 - Fix race condition that could lead to use-after-free if the `Receiver` was polled asynchronously,
-  but then dropped before completion. RUSTSEC-2026-0005 https://github.com/faern/oneshot/pull/74
+  but then dropped before completion. https://github.com/faern/oneshot/pull/74
 - Fix race conditions/UB around atomic memory orderings. These were found by running tests under
   miri. https://github.com/faern/oneshot/pull/72
 

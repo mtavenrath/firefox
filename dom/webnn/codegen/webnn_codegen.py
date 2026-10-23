@@ -1130,7 +1130,7 @@ def mozinference_symbols(output, symbols, webidl):
     combined = output.name + ".in"
     with open(symbols, encoding="utf-8") as f:
         text = f.read()
-    text += "#ifdef XP_MACOSX\n%s\n#endif\n" % "\n".join(op.ffi_fn for op in model.ops)
+    text += "\n%s\n" % "\n".join(op.ffi_fn for op in model.ops)
     with open(combined, "w", encoding="utf-8") as f:
         f.write(text)
     generate_symbols_file(output, combined)

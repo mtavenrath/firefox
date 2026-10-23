@@ -54,6 +54,7 @@ features = [
     "onnx-runtime",
     "trtx-runtime",
     "cann-runtime",
+    "burn-runtime-cpu",
     "dynamic-inputs",
 ]
 
@@ -166,12 +167,19 @@ MlTensorLimits = []
 MlTransposeOptions = []
 MlTriangularOptions = []
 MlWhereSupportLimits = []
+burn-runtime-cpu = [
+    "dep:postcard",
+    "dep:burn-tensor",
+    "dep:burn-ndarray",
+    "dep:getrandom",
+]
 cann-runtime = ["dep:hiai-rs"]
 cann-runtime-mock = []
 capi = ["dep:pretty_env_logger"]
 cli = [
     "dep:clap",
     "dep:tracing-subscriber",
+    "onnx",
 ]
 coreml-runtime = [
     "objc",
@@ -180,6 +188,7 @@ coreml-runtime = [
 default = [
     "cli",
     "onnx",
+    "burn-runtime-cpu",
 ]
 dynamic-inputs = []
 litert-runtime = [
@@ -298,6 +307,16 @@ thiserror = "2.0"
 version = "0.1"
 optional = true
 
+[dependencies.burn-ndarray]
+version = "0.21"
+optional = true
+
+[dependencies.burn-tensor]
+version = "0.21"
+features = ["std"]
+optional = true
+default-features = false
+
 [dependencies.bytemuck]
 version = "1.15"
 features = ["extern_crate_std"]
@@ -346,17 +365,24 @@ features = []
 optional = true
 
 [dependencies.ort]
-version = "=2.0.0-rc.13"
+version = "=2.0.0-rc.15"
 features = [
     "ndarray",
     "half",
     "load-dynamic",
-    "api-27",
+    "api-29",
+    "tracing",
 ]
 optional = true
+default-features = false
 
 [dependencies.pollster]
 version = "1.0.1"
+optional = true
+
+[dependencies.postcard]
+version = "1"
+features = ["alloc"]
 optional = true
 
 [dependencies.pretty_env_logger]
@@ -411,7 +437,8 @@ features = [
 optional = true
 
 [dependencies.webnn-graph]
-version = "0.4"
+git = "https://github.com/padenot/webnn-graph"
+rev = "9c7706f595abaf12b34b83559817e885787eae85"
 default-features = false
 
 [dependencies.webnn-onnx-utils]
@@ -458,6 +485,11 @@ features = ["env-filter"]
 [build-dependencies]
 cc = "1.0"
 seahash = "4.1.0"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.getrandom]
+version = "0.4"
+features = ["wasm_js"]
+optional = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc]
 version = "0.2"

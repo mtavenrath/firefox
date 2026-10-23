@@ -13,7 +13,7 @@
 #  include "parakeet_capi.h"
 #endif
 
-#ifdef XP_MACOSX
+#ifndef ANDROID
 #  include "mozilla/webnn/webnn_engine_ops.h"
 #endif
 
@@ -53,7 +53,7 @@ namespace mozilla::llama {
 #  define MOZINFERENCE_PARKEET_FUNCTION_LIST(X)
 #endif
 
-#ifdef XP_MACOSX
+#ifndef ANDROID
 // WebNN engine C API. Format: X(name)
 #  define MOZINFERENCE_WEBNN_FUNCTION_LIST(X) \
     X(webnn_last_error_message)               \

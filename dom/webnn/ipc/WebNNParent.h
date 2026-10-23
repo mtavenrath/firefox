@@ -11,13 +11,13 @@
 #include "mozilla/webnn/PWebNNParent.h"
 #include "nsTHashMap.h"
 
-#ifdef XP_MACOSX
+#ifndef ANDROID
 #  include "mozilla/webnn/webnn_engine.h"
 #endif
 
 namespace mozilla::webnn {
 
-#ifdef XP_MACOSX
+#ifndef ANDROID
 struct WebnnContextDeleter {
   void operator()(WebnnContext* aContext) const;
 };
@@ -68,7 +68,7 @@ class WebNNParent final : public PWebNNParent {
 
   const dom::ContentParentId mContentId;
 
-#ifdef XP_MACOSX
+#ifndef ANDROID
   struct Tensor {
     mozilla::UniquePtr<WebnnTensor, WebnnTensorDeleter> mTensor;
     size_t mByteLength;

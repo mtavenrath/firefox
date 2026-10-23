@@ -277,6 +277,10 @@ notes = "Identical to upstream, but with cdylib and staticlib targets disabled t
 audit-as-crates-io = false
 notes = "Prototype: fork of rustnn with Firefox build adjustments, see dom/webnn/engine."
 
+[policy.webnn-graph]
+audit-as-crates-io = false
+notes = "Prototype: fork with optional CLI dependencies for the WebNN engine."
+
 [policy.selectors]
 audit-as-crates-io = true
 notes = "This is a first-party crate which is also published to crates.io, but we should publish audits for it for the benefit of the ecosystem."
