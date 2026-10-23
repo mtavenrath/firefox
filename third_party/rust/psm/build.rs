@@ -99,6 +99,8 @@ fn main() {
         cfg.define(&*format!("CFG_TARGET_ENV_{}", env), None);
     }
 
+    println!("cargo:rerun-if-changed={}", asm);
+
     // For wasm targets we ship a precompiled `*.o` file so we just pass that
     // directly to `ar` to assemble an archive. Otherwise we're actually
     // compiling the source assembly file.
@@ -108,5 +110,9 @@ fn main() {
         cfg.file(asm);
     }
 
-    cfg.compile("libpsm_s.a");
+    if arch == "x86" && os == "windows" && env == "msvc" && !masm {
+        cfg.compile("psm_s_safeseh");
+    } else {
+        cfg.compile("libpsm_s.a");
+    }
 }
