@@ -62,6 +62,15 @@ promise_test(async t => {
     if (!device) {
         return;
     }
+    t.add_cleanup(() => device.destroy());
 
-    await navigator.ml.createContext(device);
+    let context;
+    try {
+        context = await navigator.ml.createContext(device);
+    } catch (error) {
+        assert_equals(error.name, 'NotSupportedError');
+        return;
+    }
+    t.add_cleanup(() => context.destroy());
+    assert_true(context instanceof MLContext);
 }, 'Create context with GPUDevice.');
