@@ -210,7 +210,9 @@ already_AddRefed<Promise> MLContext::CreateTensor(
   nsTArray<uint32_t> shape = webnn::ToShape(aDescriptor.mShape);
   RefPtr<MLContext> self = this;
   mActor->SendCreateTensor(
-      id, webnn::WebNNOperandDesc(aDescriptor.mDataType, shape.Clone()),
+      id,
+      webnn::WebNNOperandDesc(aDescriptor.mDataType,
+                              webnn::ToShape(aDescriptor.mShape)),
       aDescriptor.mReadable, aDescriptor.mWritable,
       [self, promise, id, dataType = aDescriptor.mDataType,
        shape = std::move(shape), byteLength = *byteLength,
