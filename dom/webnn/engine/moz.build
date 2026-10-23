@@ -6,6 +6,15 @@
 
 RustLibrary("webnn_engine")
 
+if CONFIG["OS_ARCH"] == "WINNT":
+    OS_LIBS += [
+        "dbghelp",
+        "kernel32",
+        "ntdll",
+        "userenv",
+        "ws2_32",
+    ]
+
 if CONFIG["COMPILE_ENVIRONMENT"]:
     CbindgenHeader("webnn_engine.h", inputs=["/dom/webnn/engine"])
 
