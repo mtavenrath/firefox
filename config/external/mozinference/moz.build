@@ -30,6 +30,9 @@ if CONFIG["OS_TARGET"] != "Android":
     EXTRA_LINK_DEPS += ["!" + symbols_file]
 
     USE_LIBS += ["webnn_engine"]
+
+    if CONFIG["OS_TARGET"] == "Linux":
+        LDFLAGS += ["-Wl,--undefined-glob=webnn_*"]
 else:
     SYMBOLS_FILE = "mozinference.symbols"
 
