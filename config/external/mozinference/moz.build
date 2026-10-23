@@ -13,16 +13,21 @@ SHARED_LIBRARY_NAME = "mozinference"
 if CONFIG["OS_TARGET"] != "Android":
     # The WebNN engine functions generated from WebNN.webidl are appended to
     # mozinference.symbols.
-    GENERATED_FILES += ["libmozinference.symbols"]
+    symbols_file = (
+        "mozinference.def"
+        if CONFIG["OS_TARGET"] == "WINNT"
+        else "libmozinference.symbols"
+    )
+    GENERATED_FILES += [symbols_file]
     GENERATED_FILES[
-        "libmozinference.symbols"
+        symbols_file
     ].script = "/dom/webnn/codegen/webnn_codegen.py:mozinference_symbols"
-    GENERATED_FILES["libmozinference.symbols"].inputs = [
+    GENERATED_FILES[symbols_file].inputs = [
         "mozinference.symbols",
         "/dom/webidl/WebNN.webidl",
     ]
-    SYMBOLS_FILE = "!libmozinference.symbols"
-    EXTRA_LINK_DEPS += ["!libmozinference.symbols"]
+    SYMBOLS_FILE = "!" + symbols_file
+    EXTRA_LINK_DEPS += ["!" + symbols_file]
 
     USE_LIBS += ["webnn_engine"]
 else:
