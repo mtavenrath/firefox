@@ -2,6 +2,14 @@
 /* NOTE: fastcall calling convention used on all x86 targets */
 .text
 
+/* SafeSEH-compatible object with no registered exception handlers. */
+.def @feat.00
+.scl 3
+.type 0
+.endef
+.globl @feat.00
+@feat.00 = 1
+
 .def @rust_psm_stack_direction@0
 .scl 2
 .type 32
