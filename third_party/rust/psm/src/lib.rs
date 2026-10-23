@@ -56,7 +56,6 @@ macro_rules! extern_item {
 // NB: this could be nicer across multiple blocks but we cannot do it because of
 // https://github.com/rust-lang/rust/issues/65847
 extern_item! { {
-    #![cfg_attr(link_asm, link(name="psm_s"))]
 
     #[cfg(asm)]
     fn rust_psm_stack_direction() -> u8;
