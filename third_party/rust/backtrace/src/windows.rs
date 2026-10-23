@@ -1,4 +1,4 @@
-﻿//! A module to define the FFI definitions we use on Windows for `dbghelp.dll`
+//! A module to define the FFI definitions we use on Windows for `dbghelp.dll`
 //!
 //! This module uses a custom macro, `ffi!`, to wrap all definitions to
 //! automatically generate tests to assert that our definitions here are the
