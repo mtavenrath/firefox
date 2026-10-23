@@ -243,7 +243,7 @@ const mlNumberTests = [
     }
   },
   {
-    'name': 'cast fractional float to integer',
+    'name': 'cast fractional float to integer rounds to nearest',
     'graph': {
       'inputs': {
         'clampInput': {
@@ -259,7 +259,7 @@ const mlNumberTests = [
       }],
       'expectedOutputs': {
         'clampOutput': {
-          'data': [3, 4, 5, 3, 3],
+          'data': [4, 4, 5, 4, 4],
           'descriptor': {shape: [5], dataType: 'int64'}
         }
       }

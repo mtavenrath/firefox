@@ -12,9 +12,13 @@
 #include "mozilla/Span.h"
 #include "mozilla/dom/BindingDeclarations.h"
 #include "mozilla/dom/WebNNBinding.h"
+#include "mozilla/webnn/WebNNTypes.h"
 #include "nsTArray.h"
 
 namespace mozilla::webnn {
+
+WebNNNumber CastNumber(JSContext* aCx, JS::Value aValue,
+                       dom::MLOperandDataType aType, ErrorResult& aRv);
 
 inline size_t ElementSize(dom::MLOperandDataType aType) {
   switch (aType) {

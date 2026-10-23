@@ -121,6 +121,31 @@ inline WebnnStr ToFfi(const nsCString& aValue) {
   return {aValue.get(), aValue.Length()};
 }
 
+inline WebnnNumber ToFfi(const WebNNNumber& aValue) {
+  WebnnNumber result{};
+  switch (aValue.type()) {
+    case WebNNNumber::Tdouble:
+      result.kind = 0;
+      result.value = aValue.get_double();
+      break;
+    case WebNNNumber::Tint64_t:
+      result.kind = 1;
+      result.signed_value = aValue.get_int64_t();
+      break;
+    case WebNNNumber::Tuint64_t:
+      result.kind = 2;
+      result.unsigned_value = aValue.get_uint64_t();
+      break;
+    default:
+      MOZ_CRASH("Uninitialized WebNN number");
+  }
+  return result;
+}
+
+inline WebnnOptionalNumber ToFfi(const Maybe<WebNNNumber>& aValue) {
+  return {aValue.isSome(), aValue ? ToFfi(*aValue) : WebnnNumber{}};
+}
+
 inline WebnnOptionalF64 ToFfi(const Maybe<double>& aValue) {
   return {aValue.isSome(), aValue.valueOr(0.0)};
 }

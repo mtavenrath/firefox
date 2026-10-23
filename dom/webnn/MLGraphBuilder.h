@@ -44,8 +44,10 @@ class MLGraphBuilder final : public nsISupports, public nsWrapperCache {
       const MLOperandDescriptor& aDescriptor,
       const MaybeSharedArrayBufferOrMaybeSharedArrayBufferView& aBuffer,
       ErrorResult& aRv);
-  already_AddRefed<MLOperand> Constant(MLOperandDataType aDataType,
-                                       double aValue, ErrorResult& aRv);
+  already_AddRefed<MLOperand> Constant(JSContext* aCx,
+                                       MLOperandDataType aDataType,
+                                       JS::Handle<JS::Value> aValue,
+                                       ErrorResult& aRv);
   already_AddRefed<MLOperand> Constant(MLTensor& aTensor, ErrorResult& aRv);
   already_AddRefed<Promise> Build(
       const Record<nsString, OwningNonNull<MLOperand>>& aOutputs,

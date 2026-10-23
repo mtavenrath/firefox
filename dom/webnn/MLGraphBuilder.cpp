@@ -212,7 +212,8 @@ static Span<const uint8_t> AsBytes(const T& aValue) {
 }
 
 already_AddRefed<MLOperand> MLGraphBuilder::Constant(
-    MLOperandDataType aDataType, double aValue, ErrorResult& aRv) {
+    JSContext* aCx, MLOperandDataType aDataType,
+    JS::Handle<JS::Value> aInputValue, ErrorResult& aRv) {
   // Step 1.
   if (!CheckState(aRv)) {
     return nullptr;
@@ -223,42 +224,45 @@ already_AddRefed<MLOperand> MLGraphBuilder::Constant(
     return nullptr;
   }
   // Step 2. Cast before encoding, including saturation and ties-to-even.
-  aValue = webnn::CastNumber(aValue, aDataType);
+  auto number = webnn::CastNumber(aCx, aInputValue, aDataType, aRv);
+  if (aRv.Failed() || !CheckState(aRv)) {
+    return nullptr;
+  }
+  double numericValue =
+      number.type() == webnn::WebNNNumber::Tdouble ? number.get_double() : 0.0;
 
   nsTArray<uint32_t> scalar;
   switch (aDataType) {
     case MLOperandDataType::Float32: {
-      float value = static_cast<float>(aValue);
+      float value = static_cast<float>(numericValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Int32: {
-      int32_t value = static_cast<int32_t>(aValue);
+      int32_t value = static_cast<int32_t>(numericValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Uint32: {
-      uint32_t value = static_cast<uint32_t>(aValue);
+      uint32_t value = static_cast<uint32_t>(numericValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Int64: {
-      int64_t value =
-          aValue >= 0x1p63 ? INT64_MAX : static_cast<int64_t>(aValue);
+      int64_t value = number.get_int64_t();
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Uint64: {
-      uint64_t value =
-          aValue >= 0x1p64 ? UINT64_MAX : static_cast<uint64_t>(aValue);
+      uint64_t value = number.get_uint64_t();
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Int8: {
-      int8_t value = static_cast<int8_t>(aValue);
+      int8_t value = static_cast<int8_t>(numericValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Uint8: {
-      uint8_t value = static_cast<uint8_t>(aValue);
+      uint8_t value = static_cast<uint8_t>(numericValue);
       return AddConstant(aDataType, std::move(scalar), AsBytes(value));
     }
     case MLOperandDataType::Float16: {
-      float rounded = static_cast<float>(aValue);
+      float rounded = static_cast<float>(numericValue);
       uint32_t bits = BitwiseCast<uint32_t>(rounded);
       uint16_t sign = (bits >> 16) & 0x8000;
       uint32_t magnitude = bits & 0x7fffffff;

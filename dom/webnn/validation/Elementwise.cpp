@@ -3,10 +3,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include <limits>
-
 #include "ValidationUtils.h"
 #include "mozilla/ErrorResult.h"
+#include "mozilla/webnn/WebNNTypes.h"
 #include "mozilla/webnn/WebNNValidation.h"
 
 namespace mozilla::webnn {
@@ -218,18 +217,27 @@ bool ValidateCast(const MLOperand& aInput, MLOperandDataType aDataType,
 // The steps swap the defaults; a missing bound does not clamp, as in the
 // member descriptions.
 bool ValidateClamp(const MLOperand& aInput, const dom::MLClampOptions& aOptions,
+                   const WebNNClampOptions& aNumericOptions,
                    nsTArray<OperandDescriptor>& aOutputs, ErrorResult& aRv) {
-  constexpr double kInfinity = std::numeric_limits<double>::infinity();
-  double minValue = CastNumber(
-      aOptions.mMinValue.WasPassed() ? aOptions.mMinValue.Value() : -kInfinity,
-      aInput.DataType());
-  double maxValue = CastNumber(
-      aOptions.mMaxValue.WasPassed() ? aOptions.mMaxValue.Value() : kInfinity,
-      aInput.DataType());
-  if (minValue > maxValue) {
-    ThrowOpTypeError(aRv, aOptions.mLabel, "clamp",
-                     "minValue is greater than maxValue");
-    return false;
+  if (aNumericOptions.minValue() && aNumericOptions.maxValue()) {
+    const auto& minValue = *aNumericOptions.minValue();
+    const auto& maxValue = *aNumericOptions.maxValue();
+    bool invalid;
+    switch (aInput.DataType()) {
+      case MLOperandDataType::Int64:
+        invalid = minValue.get_int64_t() > maxValue.get_int64_t();
+        break;
+      case MLOperandDataType::Uint64:
+        invalid = minValue.get_uint64_t() > maxValue.get_uint64_t();
+        break;
+      default:
+        invalid = minValue.get_double() > maxValue.get_double();
+    }
+    if (invalid) {
+      ThrowOpTypeError(aRv, aOptions.mLabel, "clamp",
+                       "minValue is greater than maxValue");
+      return false;
+    }
   }
   CopyOperand(aInput, aOutputs);
   return true;

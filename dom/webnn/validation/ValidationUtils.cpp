@@ -9,6 +9,8 @@
 #include <cmath>
 #include <limits>
 
+#include "js/BigInt.h"
+#include "js/Conversions.h"
 #include "mozilla/CheckedInt.h"
 #include "mozilla/ErrorResult.h"
 #include "mozilla/dom/MLContext.h"
@@ -241,6 +243,47 @@ double CastNumber(double aX, MLOperandDataType aType) {
       return ConvertToInt(aX, 8, false);
   }
   MOZ_CRASH("Unexpected MLOperandDataType");
+}
+
+WebNNNumber CastNumber(JSContext* aCx, JS::Value aValue,
+                       MLOperandDataType aType, ErrorResult& aRv) {
+  JS::Rooted<JS::Value> value(aCx, aValue);
+  if (value.isBigInt()) {
+    // Preserve the integer while applying the destination type's saturation.
+    JS::BigInt* integer = value.toBigInt();
+    if (aType == MLOperandDataType::Int64) {
+      int64_t result;
+      if (!JS::BigIntFits(integer, &result)) {
+        result = JS::BigIntIsNegative(integer) ? INT64_MIN : INT64_MAX;
+      }
+      return WebNNNumber(result);
+    }
+    if (aType == MLOperandDataType::Uint64) {
+      uint64_t result;
+      if (!JS::BigIntFits(integer, &result)) {
+        result = JS::BigIntIsNegative(integer) ? 0 : UINT64_MAX;
+      }
+      return WebNNNumber(result);
+    }
+    aRv.ThrowTypeError("BigInt requires an int64 or uint64 operand");
+    return WebNNNumber(0.0);
+  }
+  double number;
+  if (!JS::ToNumber(aCx, value, &number)) {
+    aRv.NoteJSContextException(aCx);
+    return WebNNNumber(0.0);
+  }
+  // Cast before encoding, including saturation and ties-to-even.
+  number = CastNumber(number, aType);
+  if (aType == MLOperandDataType::Int64) {
+    return WebNNNumber(number >= 0x1p63 ? INT64_MAX
+                                        : static_cast<int64_t>(number));
+  }
+  if (aType == MLOperandDataType::Uint64) {
+    return WebNNNumber(number >= 0x1p64 ? UINT64_MAX
+                                        : static_cast<uint64_t>(number));
+  }
+  return WebNNNumber(number);
 }
 
 }  // namespace mozilla::webnn

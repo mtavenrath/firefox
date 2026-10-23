@@ -8,9 +8,10 @@
  *
  * Copied from testing/web-platform/tests/interfaces/webnn.idl, with these
  * deviations: behind dom.webnn.enabled, FrozenArray is spelled
- * [Frozen, Cached, Pure] sequence, and MLNumber is unrestricted double because
- * bigint is not supported by our bindings. The MLGraphBuilder operator plumbing
- * is generated from this file, see dom/webnn/codegen.
+ * [Frozen, Cached, Pure] sequence, and MLNumber uses any with native numeric
+ * conversion because bigint unions are not supported by our bindings. The pad
+ * value default is applied natively. The MLGraphBuilder operator plumbing is
+ * generated from this file, see dom/webnn/codegen.
  */
 
 interface mixin NavigatorML {
@@ -143,7 +144,7 @@ dictionary MLOperatorOptions {
   USVString label = "";
 };
 
-typedef unrestricted double MLNumber;
+typedef any MLNumber;
 
 dictionary MLTensorDescriptor : MLOperandDescriptor {
   boolean readable = false;
@@ -906,7 +907,7 @@ enum MLPaddingMode {
 
 dictionary MLPadOptions : MLOperatorOptions {
   MLPaddingMode mode = "constant";
-  MLNumber value = 0;
+  MLNumber value;
 };
 
 partial interface MLGraphBuilder {

@@ -79,6 +79,29 @@ impl Conv<Option<serde_json::Value>> for WebnnOptionalF64 {
     }
 }
 
+impl Conv<serde_json::Value> for WebnnNumber {
+    fn conv(&self) -> Result<serde_json::Value, Error> {
+        match self.kind {
+            0 => number(self.value),
+            1 => Ok(self.signed_value.into()),
+            2 => Ok(self.unsigned_value.into()),
+            _ => Err(Error::InvalidArgument("invalid number kind".to_string())),
+        }
+    }
+}
+
+impl Conv<Option<serde_json::Value>> for WebnnNumber {
+    fn conv(&self) -> Result<Option<serde_json::Value>, Error> {
+        Ok(Some(conv(self)?))
+    }
+}
+
+impl Conv<Option<serde_json::Value>> for WebnnOptionalNumber {
+    fn conv(&self) -> Result<Option<serde_json::Value>, Error> {
+        self.present.then(|| conv(&self.value)).transpose()
+    }
+}
+
 impl Conv<MLOperand> for WebnnOperandId {
     fn conv(&self) -> Result<MLOperand, Error> {
         Ok(MLOperand::from(self.0))
