@@ -57,7 +57,6 @@ namespace mozilla::llama {
 // WebNN engine C API. Format: X(name)
 #  define MOZINFERENCE_WEBNN_FUNCTION_LIST(X) \
     X(webnn_last_error_message)               \
-    X(webnn_set_temp_directory)               \
     X(webnn_context_create)                   \
     X(webnn_context_destroy)                  \
     X(webnn_context_create_tensor)            \

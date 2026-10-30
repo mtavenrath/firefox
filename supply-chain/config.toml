@@ -275,11 +275,7 @@ notes = "Identical to upstream, but with cdylib and staticlib targets disabled t
 
 [policy.rustnn]
 audit-as-crates-io = false
-notes = "Prototype: fork of rustnn with Firefox build adjustments, see dom/webnn/engine."
-
-[policy.webnn-graph]
-audit-as-crates-io = false
-notes = "Prototype: fork with optional CLI dependencies for the WebNN engine."
+notes = "Prototype: upstream RustNN main plus CoreML fixes from rustnn/rustnn#362; see dom/webnn/engine."
 
 [policy.selectors]
 audit-as-crates-io = true

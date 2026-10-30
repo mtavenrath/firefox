@@ -119,14 +119,9 @@ replace-with = "vendored-sources"
 git = "https://github.com/mozilla/nss-rs"
 replace-with = "vendored-sources"
 
-[source."git+https://github.com/padenot/rustnn?rev=de3392d2feedbe4e6f633f057fb29e2e7895f061"]
+[source."git+https://github.com/padenot/rustnn?rev=e5b201a79655c57d03ab41481b1686dd671a3a83"]
 git = "https://github.com/padenot/rustnn"
-rev = "de3392d2feedbe4e6f633f057fb29e2e7895f061"
-replace-with = "vendored-sources"
-
-[source."git+https://github.com/padenot/webnn-graph?rev=9c7706f595abaf12b34b83559817e885787eae85"]
-git = "https://github.com/padenot/webnn-graph"
-rev = "9c7706f595abaf12b34b83559817e885787eae85"
+rev = "e5b201a79655c57d03ab41481b1686dd671a3a83"
 replace-with = "vendored-sources"
 
 [source."git+https://github.com/rust-minidump/minidump-writer.git?rev=3ab1604f91db05ec3f3a84d779a2871df7d9afd7"]

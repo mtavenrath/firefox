@@ -88,6 +88,5 @@ webnn_graph_builder_destroy
 webnn_graph_builder_input
 webnn_graph_destroy
 webnn_last_error_message
-webnn_set_temp_directory
 webnn_tensor_destroy
 #endif

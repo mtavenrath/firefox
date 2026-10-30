@@ -43,6 +43,9 @@ make test-wpt-coreml
 # Compare the opt-in CoreML storage paths with the default baseline
 WPT_COREML_TENSOR_MODE=persistent make test-wpt-coreml
 WPT_COREML_TENSOR_MODE=backings make test-wpt-coreml
+
+# Compare the CoreML float16 lowerings (native is the default) on one requested device
+WPT_COREML_FLOAT16=exact WPT_COREML_DEVICE=gpu make test-wpt-coreml
 ```
 
 Always use `--test-threads 1` for WPT runs. Parallel execution is not validated for `MLContext` thread safety.
@@ -152,8 +155,12 @@ The compatibility ATOL/RTOL and ULP comparators retain their existing behavior;
 the stronger nonfinite gate and full-width ULP budgets apply only to strict mode.
 Callbacks that require intermediate operands are reevaluated with shapes and
 types from the Rust builder, using Node.js and the fetched source file. No
-tolerance formula is reimplemented. An upstream callback that still returns
-an undefined or nonfinite budget remains a test failure.
+tolerance formula is reimplemented. For validated Number-valued integer output
+arrays, an undefined or NaN ULP budget preserves the upstream comparator's exact
+equality behavior as zero ULP: equal integers pass before the budget is consulted,
+and unequal integers fail. This does not apply to floating-point, BigInt, scalar,
+or malformed expectations, or to infinite budgets; unresolved budgets in those
+cases remain a test failure.
 The strict finite-value comparator follows the upstream helpers: signed-magnitude
 bit distance for FP32 and FP16 (signed zeros are equal), expected values rounded
 directly to FP16 with ties-to-even as `Float16Array` does, and unrounded
@@ -175,11 +182,21 @@ fields retain their zero-conversion semantics, and string labels are unchanged.
 The test-only JSON dependency enables round-trip binary64 parsing so finite source
 numbers also retain their original JavaScript precision. Production JSON parsing is unchanged.
 
+The corpus pin includes merged WPT [#63150](https://github.com/web-platform-tests/wpt/pull/63150)
+and [#63151](https://github.com/web-platform-tests/wpt/pull/63151), which correct
+signed FP16 distance and binary64 rounding. The adapter and `WPT_REVISION` move
+together: older helper revisions are not interchangeable with this adapter.
+Use a Node.js version with native `Float16Array` support for the fixture bridge.
+The fixture sandbox also exposes native `structuredClone` so tests that derive
+cases from shared graphs preserve their numeric values and independent options.
+`WPT_DIR` can select a separately prepared corpus; do not run `fetch-wpt` against
+a checkout containing unpublished tests.
+
 `make test-wpt-tolerance` runs the comparator regressions without a backend.
-Fetch the corpus with `make fetch-wpt`, then, with Node.js available, run
+With the corresponding corpus prepared and Node.js available, run
 `make test-wpt-tolerance-parity` to compare finite ULP cases directly with the
 upstream JavaScript helpers across every finite FP16 encoding, opposite signs,
-zeros and adjacent halfway values, plus FP32 and ATOL boundary cases. Set
+zeros, halfway values and their immediate binary64 neighbors, plus FP32 and ATOL boundary cases. Set
 `WPT_TOLERANCE_PARITY_JSON=/path/to/parity.json` to save the vectors and checked
 distances for replay through the browser's upstream `testharness.js`/`utils.js`.
 The full ONNX and CoreML Make targets run this parity check after a successful
@@ -375,7 +392,7 @@ A scheduled workflow (`.github/workflows/wpt-sync.yml`) runs these and opens a P
 
 ### Burn CPU
 
-`make test-wpt-burn-cpu` uses `burn-runtime-cpu` and selects `Backend::BurnCpu` through the
+`make test-wpt-burn-cpu` uses `burn-cpu-runtime` and selects `Backend::BurnCpu` through the
 shared MLContext runner. `TEST_FILTER=relu` limits trials. Regenerate
 `tests/wpt_conformance/burn-cpu_expected_failures.txt` with `make wpt-sync-burn-cpu`.
 Direct Cargo runs use `WPT_BACKEND=burn-cpu`. No GPU or external runtime is required.

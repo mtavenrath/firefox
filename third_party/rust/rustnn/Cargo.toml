@@ -54,7 +54,7 @@ features = [
     "onnx-runtime",
     "trtx-runtime",
     "cann-runtime",
-    "burn-runtime-cpu",
+    "burn-cpu-runtime",
     "dynamic-inputs",
 ]
 
@@ -167,55 +167,51 @@ MlTensorLimits = []
 MlTransposeOptions = []
 MlTriangularOptions = []
 MlWhereSupportLimits = []
-burn-runtime-cpu = [
-    "dep:postcard",
+burn-cpu-converter = ["dep:postcard"]
+burn-cpu-runtime = [
+    "burn-cpu-converter",
     "dep:burn-tensor",
     "dep:burn-ndarray",
     "dep:getrandom",
 ]
-cann-runtime = ["dep:hiai-rs"]
+cann-converter = ["dep:hiai-rs"]
+cann-runtime = ["cann-converter"]
 cann-runtime-mock = []
 capi = ["dep:pretty_env_logger"]
-cli = [
-    "dep:clap",
-    "dep:tracing-subscriber",
-    "onnx",
-]
+coreml-converter = []
 coreml-runtime = [
+    "coreml-converter",
     "objc",
     "block",
 ]
 default = [
-    "cli",
-    "onnx",
-    "burn-runtime-cpu",
+    "onnx-converter",
+    "burn-cpu-runtime",
 ]
 dynamic-inputs = []
+litert-converter = ["dep:flatbuffers"]
 litert-runtime = [
-    "litert",
-    "litert-sys",
-    "dep:flatbuffers",
+    "litert-converter",
+    "dep:litert",
+    "dep:litert-sys",
 ]
 native-examples = []
-onnx = ["dep:webnn-onnx-utils"]
+onnx-converter = ["dep:webnn-onnx-utils"]
 onnx-runtime = [
-    "onnx",
+    "onnx-converter",
     "ort",
     "ndarray",
 ]
 pollster = ["dep:pollster"]
+trtx-converter = ["dep:trtx"]
 trtx-enterprise = [
     "trtx-runtime",
     "trtx/enterprise",
 ]
 trtx-runtime = [
-    "trtx",
-    "cudarc",
+    "trtx-converter",
+    "dep:cudarc",
     "zstd-cache-compression",
-]
-trtx-runtime-mock = [
-    "trtx/mock",
-    "cudarc",
 ]
 webnn-runtime = [
     "wasm-bindgen",
@@ -284,11 +280,6 @@ crate-type = ["rlib"]
 path = "src/lib.rs"
 doctest = false
 
-[[bin]]
-name = "rustnn"
-path = "src/main.rs"
-required-features = ["cli"]
-
 [dependencies]
 base64 = "0.23"
 bytes = "1.6"
@@ -320,11 +311,6 @@ default-features = false
 [dependencies.bytemuck]
 version = "1.15"
 features = ["extern_crate_std"]
-
-[dependencies.clap]
-version = "4.5"
-features = ["derive"]
-optional = true
 
 [dependencies.cudarc]
 version = "0.19"
@@ -402,17 +388,12 @@ version = "0.28.0"
 features = ["derive"]
 
 [dependencies.tracing]
-version = "0.1"
+version = "0.1.44"
 features = [
     "attributes",
     "std",
 ]
 default-features = false
-
-[dependencies.tracing-subscriber]
-version = "0.3"
-features = ["env-filter"]
-optional = true
 
 [dependencies.trtx]
 version = "0.9.1"
@@ -437,8 +418,7 @@ features = [
 optional = true
 
 [dependencies.webnn-graph]
-git = "https://github.com/padenot/webnn-graph"
-rev = "9c7706f595abaf12b34b83559817e885787eae85"
+version = "0.4"
 default-features = false
 
 [dependencies.webnn-onnx-utils]
@@ -486,6 +466,10 @@ features = ["env-filter"]
 cc = "1.0"
 seahash = "4.1.0"
 
+[build-dependencies.prost-build]
+version = "0.12"
+features = ["cleanup-markdown"]
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies.getrandom]
 version = "0.4"
 features = ["wasm_js"]
@@ -519,3 +503,14 @@ check-cfg = [
     'cfg(feature, values("cargo-clippy"))',
     "cfg(web_sys_unstable_apis)",
 ]
+
+[workspace]
+members = [
+    ".",
+    "cli",
+]
+default-members = [
+    ".",
+    "cli",
+]
+resolver = "3"

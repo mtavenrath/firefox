@@ -184,34 +184,6 @@ WebNNParent::Tensor* WebNNParent::GetTensor(uint32_t aTensorId) {
   return tensor ? tensor->get() : nullptr;
 }
 
-#  ifdef XP_MACOSX
-// Points rustnn at a directory the sandbox lets this process write to. Must
-// match the directory allowed by the HWInference sandbox policy.
-static bool EnsureTempDirectory() {
-  static bool sDone = false;
-  if (sDone) {
-    return true;
-  }
-  char tempDir[PATH_MAX];
-  char realTempDir[PATH_MAX];
-  if (!confstr(_CS_DARWIN_USER_TEMP_DIR, tempDir, sizeof(tempDir)) ||
-      !realpath(tempDir, realTempDir)) {
-    return false;
-  }
-  nsAutoCString dir(realTempDir);
-  dir.AppendLiteral("/org.mozilla.webnn");
-  if (mkdir(dir.get(), 0700) && errno != EEXIST) {
-    return false;
-  }
-  if (Lib()->webnn_set_temp_directory(dir.get()) != WebnnStatus_Success) {
-    return false;
-  }
-  sDone = true;
-  return true;
-}
-
-#  endif
-
 void WebNNParent::ReleaseEngineObjects() {
   mGraphs.Clear();
   mTensors.Clear();
@@ -227,13 +199,6 @@ mozilla::ipc::IPCResult WebNNParent::RecvCreateContext(
     aResolver("The WebNN engine could not be loaded"_ns);
     return IPC_OK();
   }
-
-#  ifdef XP_MACOSX
-  if (!EnsureTempDirectory()) {
-    aResolver("Could not create the WebNN temporary directory"_ns);
-    return IPC_OK();
-  }
-#  endif
 
   AUTO_PROFILER_MARKER_TEXT("WebNN:CreateContext", ML_SETUP, {}, ""_ns);
   WebnnContext* context = nullptr;

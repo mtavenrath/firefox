@@ -199,16 +199,6 @@ pub extern "C" fn webnn_last_error_message() -> *const c_char {
     LAST_ERROR.with(|slot| slot.borrow().as_ptr())
 }
 
-/// Sets the directory where the backends write temporary files.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn webnn_set_temp_directory(path: *const c_char) -> WebnnStatus {
-    ffi_call(|| {
-        let path = unsafe { input_str(path)? };
-        rustnn::temp_dir::set_temp_dir(Some(path.into()));
-        Ok(())
-    })
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn webnn_context_create(
     power_preference: WebnnPowerPreference,

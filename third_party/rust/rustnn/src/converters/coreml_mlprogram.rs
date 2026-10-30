@@ -244,11 +244,59 @@ fn constant_copies(
     copies
 }
 
+impl CoremlMlProgramConverter {
+    /// Data-free URL compilation can crash BNNS for a constant identity transpose.
+    /// Only source-proven copies may use the asset route: arithmetic and real
+    /// typed boundaries must retain the precision-preserving URL route.
+    #[cfg(any(feature = "coreml-runtime", test))]
+    pub(crate) fn constant_copy_asset_eligible(graph: &GraphInfo, model_bytes: &[u8]) -> bool {
+        use prost::Message;
+        if !graph.input_operands.is_empty() || graph.output_operands.is_empty() {
+            return false;
+        }
+        let Ok(lowering_graph) = LoweringGraph::new(graph) else {
+            return false;
+        };
+        let graph = &lowering_graph;
+        let origins = copy_origins(graph);
+        let is_constant_copy = |id: u32| {
+            origins
+                .get(id as usize)
+                .copied()
+                .flatten()
+                .and_then(|origin| graph.operand(origin))
+                .is_some_and(|operand| operand.kind == OperandKind::Constant)
+        };
+        graph.output_operands.iter().all(|&id| {
+            graph
+                .operand(id)
+                .is_some_and(|operand| operand.kind == OperandKind::Output)
+                && is_constant_copy(id)
+        }) && graph.operations.iter().all(|operation| {
+            !operation.output_operands().is_empty()
+                && operation
+                    .output_operands()
+                    .iter()
+                    .copied()
+                    .all(is_constant_copy)
+        }) && Model::decode(model_bytes).is_ok_and(|model| {
+            matches!(
+                model.r#type,
+                Some(crate::protos::coreml::specification::model::Type::MlProgram(_))
+            )
+        })
+    }
+}
+
 /// Conversion-local names and the topology prerequisite for copy proofs.
 /// The public converter also accepts GraphInfo values not built by MLGraphBuilder.
 struct LoweringGraph<'a> {
     graph: &'a GraphInfo,
     names: Vec<String>,
+    /// `CoremlFloat16Precision::Exact`: float16 arithmetic, activations, normalization and
+    /// transport are evaluated in float32 and explicit float16 boundaries are materialized.
+    /// Otherwise float16 lowers to native float16 MIL kernels.
+    exact_float16: bool,
 }
 
 impl<'a> LoweringGraph<'a> {
@@ -319,6 +367,7 @@ impl<'a> LoweringGraph<'a> {
             names: physical_operand_names(
                 (0..graph.operands.len()).map(|id| logical_operand_name(graph, id as u32)),
             ),
+            exact_float16: false,
         })
     }
 }
@@ -406,6 +455,28 @@ fn equivalent_output_names(graph: &LoweringGraph<'_>) -> HashMap<String, String>
             (id != chosen).then(|| (operand_name(graph, id), operand_name(graph, chosen)))
         })
         .collect()
+}
+mod precision;
+
+/// Whether a layerNormalization normalizes the trailing axes in ascending order, the layout
+/// in which MIL `layer_norm` applies constant `gamma`/`beta` exactly as WebNN's scale and
+/// bias. Omitted axes default to every axis after the first, which is trailing.
+fn layer_norm_has_trailing_axes(graph: &GraphInfo, operation: &Operation) -> bool {
+    let Operation::LayerNormalization { input, options, .. } = operation else {
+        return false;
+    };
+    let Some(axes) = options.as_ref().and_then(|options| options.axes.as_ref()) else {
+        return true;
+    };
+    let rank = graph
+        .operand(*input)
+        .map_or(0, |operand| operand.descriptor.shape.len());
+    !axes.is_empty()
+        && rank.checked_sub(axes.len()).is_some_and(|start| {
+            axes.iter()
+                .enumerate()
+                .all(|(index, &axis)| axis as usize == start + index)
+        })
 }
 
 /// Convert zero_point byte data from a source dtype to a target dtype.
@@ -507,8 +578,6 @@ mod mil_ops {
     pub const AVG_POOL: &str = "avg_pool";
     pub const MAX_POOL: &str = "max_pool";
     pub const L2_POOL: &str = "l2_pool";
-    pub const GLOBAL_AVG_POOL: &str = "reduce_mean"; // Global pooling via reduction
-    pub const GLOBAL_MAX_POOL: &str = "reduce_max"; // Global pooling via reduction
 
     // Normalization
     pub const BATCH_NORM: &str = "batch_norm";
@@ -531,7 +600,7 @@ mod mil_ops {
     pub const ABS: &str = "abs";
     pub const CEIL: &str = "ceil";
     pub const FLOOR: &str = "floor";
-    pub const ROUND_EVEN: &str = "round"; // WebNN roundEven: round to nearest even (MIL "round")
+    pub const ROUND_EVEN: &str = "round"; // Only a mapping; emitted through emit_round_even.
     pub const NEG: &str = "mul"; // Multiply by -1
     pub const IDENTITY: &str = "identity";
     pub const EXP: &str = "exp";
@@ -542,7 +611,6 @@ mod mil_ops {
     pub const COS: &str = "cos";
     pub const TAN: &str = "tan";
     pub const ERF: &str = "erf";
-    pub const RECIPROCAL: &str = "inverse";
 
     // Logic operations
     pub const EQUAL: &str = "equal";
@@ -626,9 +694,6 @@ mod mil_ops {
     pub const UPSAMPLE_NEAREST_NEIGHBOR: &str = "upsample_nearest_neighbor";
     pub const UPSAMPLE_BILINEAR: &str = "upsample_bilinear";
 }
-
-// Default epsilon value used by several CoreML operations for numerical stability.
-const DEFAULT_EPSILON: f32 = 1e-45;
 
 /// Converts a graph to a CoreML MLProgram (MIL) model.
 #[derive(Default)]
@@ -1668,6 +1733,526 @@ impl CoremlMlProgramConverter {
         Self::create_mil_operation(mil_ops::CAST, inputs, vec![output_type])
     }
 
+    fn append_nan_preserving_tanh(
+        graph: &LoweringGraph<'_>,
+        block: &mut Block,
+        input_name: String,
+        output_type: NamedValueType,
+    ) {
+        use crate::protos::coreml::mil_spec::{DataType as MilDataType, value_type};
+
+        let mut reserved: std::collections::HashSet<String> = graph
+            .operands
+            .iter()
+            .enumerate()
+            .map(|(id, _)| operand_name(graph, id as u32))
+            .chain(
+                block
+                    .operations
+                    .iter()
+                    .flat_map(|op| op.outputs.iter().map(|output| output.name.clone())),
+            )
+            .chain([input_name.clone(), output_type.name.clone()])
+            .collect();
+        let mut fresh = |suffix: &str| {
+            let base = format!("{}_tanh_{suffix}", output_type.name);
+            let mut name = base.clone();
+            let mut index = 0usize;
+            while !reserved.insert(name.clone()) {
+                index += 1;
+                name = format!("{base}_{index}");
+            }
+            name
+        };
+        let mut kernel_type = output_type.clone();
+        kernel_type.name = fresh("kernel");
+        let mut condition_type = output_type.clone();
+        condition_type.name = fresh("ordered");
+        if let Some(ValueType {
+            r#type: Some(value_type::Type::TensorType(tensor)),
+        }) = &mut condition_type.r#type
+        {
+            tensor.data_type = MilDataType::Bool as i32;
+        }
+        let mut kernel_inputs = HashMap::new();
+        kernel_inputs.insert("x".into(), Self::create_name_argument(input_name.clone()));
+        block.operations.push(Self::create_mil_operation(
+            mil_ops::TANH,
+            kernel_inputs,
+            vec![kernel_type.clone()],
+        ));
+        let mut condition_inputs = HashMap::new();
+        condition_inputs.insert("x".into(), Self::create_name_argument(input_name.clone()));
+        condition_inputs.insert("y".into(), Self::create_name_argument(input_name.clone()));
+        block.operations.push(Self::create_mil_operation(
+            mil_ops::EQUAL,
+            condition_inputs,
+            vec![condition_type.clone()],
+        ));
+        // Some native tanh kernels return +/-1 for NaN. A represented NaN
+        // must remain NaN; comparison is false only for unordered values.
+        let mut select_inputs = HashMap::new();
+        select_inputs.insert(
+            "cond".into(),
+            Self::create_name_argument(condition_type.name),
+        );
+        select_inputs.insert("a".into(), Self::create_name_argument(kernel_type.name));
+        select_inputs.insert("b".into(), Self::create_name_argument(input_name));
+        block.operations.push(Self::create_mil_operation(
+            "select",
+            select_inputs,
+            vec![output_type],
+        ));
+    }
+
+    /// MIL round uses away-from-zero ties on GPU and Neural Engine kernels. Compute
+    /// the nearest integer explicitly, incrementing a tie only when floor(x) is odd.
+    /// Every step is exact in the input type, so native float16 evaluates in float16;
+    /// exact float16 evaluates in float32, which also keeps subnormals visible to the
+    /// comparisons on paths that flush them.
+    fn emit_round_even(
+        graph: &LoweringGraph<'_>,
+        block: &mut Block,
+        input: String,
+        output: NamedValueType,
+    ) {
+        use crate::protos::coreml::mil_spec::{DataType as MilType, value_type};
+        let dtype = match output.r#type.as_ref().and_then(|t| t.r#type.as_ref()) {
+            Some(value_type::Type::TensorType(t)) => t.data_type,
+            _ => unreachable!("roundEven output is a tensor"),
+        };
+        let mut names: std::collections::HashSet<String> = block
+            .operations
+            .iter()
+            .flat_map(|op| op.outputs.iter().map(|v| v.name.clone()))
+            .chain(block.inputs.iter().map(|v| v.name.clone()))
+            .chain(
+                graph
+                    .operands
+                    .iter()
+                    .enumerate()
+                    .map(|(id, _)| operand_name(graph, id as u32)),
+            )
+            .chain([input.clone(), output.name.clone()])
+            .collect();
+        let mut fresh = |suffix: &str| {
+            let base = format!("{}_round_even_{suffix}", output.name);
+            let mut name = base.clone();
+            let mut index = 0;
+            while !names.insert(name.clone()) {
+                index += 1;
+                name = format!("{base}_{index}");
+            }
+            name
+        };
+        let typed = |name: String, dtype: i32| {
+            let mut value = output.clone();
+            value.name = name;
+            let Some(value_type::Type::TensorType(tensor)) =
+                value.r#type.as_mut().and_then(|t| t.r#type.as_mut())
+            else {
+                unreachable!();
+            };
+            tensor.data_type = dtype;
+            value
+        };
+        let work = if dtype == MilType::Float16 as i32 && !graph.exact_float16 {
+            dtype
+        } else {
+            MilType::Float32 as i32
+        };
+        let immediate = |value: f32| {
+            if work == MilType::Float16 as i32 {
+                Self::create_immediate_float16(value)
+            } else {
+                Self::create_immediate_float(value)
+            }
+        };
+        // `work` is float32 unless native float16 evaluates in place.
+        let x = if dtype == work {
+            input
+        } else {
+            let name = fresh("wide");
+            block.operations.push(Self::create_cast_operation(
+                input,
+                typed(name.clone(), work),
+                "fp32",
+            ));
+            name
+        };
+        let mut emit = |block: &mut Block,
+                        op: &str,
+                        suffix: &str,
+                        dtype: i32,
+                        bindings: Vec<(&str, Argument)>| {
+            let name = fresh(suffix);
+            block.operations.push(Self::create_mil_operation(
+                op,
+                bindings.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+                vec![typed(name.clone(), dtype)],
+            ));
+            name
+        };
+        let named = |name: &str| Self::create_name_argument(name.into());
+        let floor = emit(block, "floor", "floor", work, vec![("x", named(&x))]);
+        let fraction = emit(
+            block,
+            "sub",
+            "fraction",
+            work,
+            vec![("x", named(&x)), ("y", named(&floor))],
+        );
+        let half_floor = emit(
+            block,
+            "mul",
+            "half_floor",
+            work,
+            vec![("x", named(&floor)), ("y", immediate(0.5))],
+        );
+        let pairs = emit(
+            block,
+            "floor",
+            "pairs",
+            work,
+            vec![("x", named(&half_floor))],
+        );
+        let paired = emit(
+            block,
+            "mul",
+            "paired",
+            work,
+            vec![("x", named(&pairs)), ("y", immediate(2.0))],
+        );
+        let parity = emit(
+            block,
+            "sub",
+            "parity",
+            work,
+            vec![("x", named(&floor)), ("y", named(&paired))],
+        );
+        let boolean = MilType::Bool as i32;
+        let above = emit(
+            block,
+            "greater",
+            "above",
+            boolean,
+            vec![("x", named(&fraction)), ("y", immediate(0.5))],
+        );
+        let tie = emit(
+            block,
+            "equal",
+            "tie",
+            boolean,
+            vec![("x", named(&fraction)), ("y", immediate(0.5))],
+        );
+        let odd = emit(
+            block,
+            "equal",
+            "odd",
+            boolean,
+            vec![("x", named(&parity)), ("y", immediate(1.0))],
+        );
+        let odd_tie = emit(
+            block,
+            "logical_and",
+            "odd_tie",
+            boolean,
+            vec![("x", named(&tie)), ("y", named(&odd))],
+        );
+        let increment = emit(
+            block,
+            "logical_or",
+            "increment",
+            boolean,
+            vec![("x", named(&above)), ("y", named(&odd_tie))],
+        );
+        let next = emit(block, "ceil", "next", work, vec![("x", named(&x))]);
+        let rounded = emit(
+            block,
+            "select",
+            "rounded",
+            work,
+            vec![
+                ("cond", named(&increment)),
+                ("a", named(&next)),
+                ("b", named(&floor)),
+            ],
+        );
+        block.operations.push(Self::create_cast_operation(
+            rounded,
+            output,
+            if dtype == MilType::Float32 as i32 {
+                "fp32"
+            } else {
+                "fp16"
+            },
+        ));
+    }
+
+    /// CoreML half movement kernels can flush represented half subnormals.
+    /// Widen transport and qualified kernels, then restore the public type.
+    /// Running after lowering also covers helper and deferred layout operations
+    /// without cloning graph constants or widening the stored weight blob.
+    fn preserve_float16_transport(
+        function: &mut Function,
+        block: &mut Block,
+    ) -> std::collections::HashSet<String> {
+        use crate::protos::coreml::mil_spec::{DataType as MilDataType, value_type};
+
+        fn tensor(value: &NamedValueType) -> Option<&TensorType> {
+            match &value.r#type.as_ref()?.r#type {
+                Some(value_type::Type::TensorType(tensor)) => Some(tensor),
+                _ => None,
+            }
+        }
+
+        fn widen(value: &mut NamedValueType) {
+            if let Some(ValueType {
+                r#type: Some(value_type::Type::TensorType(tensor)),
+            }) = &mut value.r#type
+            {
+                tensor.data_type = MilDataType::Float32 as i32;
+            }
+        }
+
+        let types: HashMap<String, NamedValueType> = function
+            .inputs
+            .iter()
+            .chain(block.operations.iter().flat_map(|op| &op.outputs))
+            .map(|value| (value.name.clone(), value.clone()))
+            .collect();
+        let constants: std::collections::HashSet<_> = block
+            .operations
+            .iter()
+            .filter(|op| op.r#type == "const")
+            .flat_map(|op| op.outputs.iter().map(|output| output.name.clone()))
+            .collect();
+        let mut reserved: std::collections::HashSet<String> = types.keys().cloned().collect();
+        let mut fresh_name = |base: String| {
+            let mut name = base.clone();
+            let mut suffix = 0usize;
+            while !reserved.insert(name.clone()) {
+                suffix += 1;
+                name = format!("{base}_{suffix}");
+            }
+            name
+        };
+        let mut operations = Vec::with_capacity(block.operations.len());
+        let mut promoted_results = std::collections::HashSet::new();
+        for (index, mut operation) in std::mem::take(&mut block.operations)
+            .into_iter()
+            .enumerate()
+        {
+            let source_dtype = operation
+                .inputs
+                .get("x")
+                .and_then(|argument| argument.arguments.first())
+                .and_then(|binding| match &binding.binding {
+                    Some(Binding::Name(name)) => types.get(name),
+                    _ => None,
+                })
+                .and_then(tensor)
+                .map(|tensor| tensor.data_type);
+            if operation.r#type == mil_ops::CAST
+                && operation
+                    .outputs
+                    .iter()
+                    .all(|output| tensor(output).is_some_and(|t| Some(t.data_type) == source_dtype))
+                && source_dtype.is_some_and(|dtype| {
+                    dtype == MilDataType::Float16 as i32 || dtype == MilDataType::Float32 as i32
+                })
+            {
+                // Same-dtype casts transport represented values. Native half
+                // casts flush subnormals; native fp32 casts can narrow via half.
+                // Real narrowing/widening casts keep their typed boundary.
+                operation.r#type = "identity".into();
+                operation.inputs.remove("dtype");
+            }
+            // These operations move/select values without computing them.
+            // Indices, shapes and conditions retain their original integer type.
+            let movement = matches!(
+                operation.r#type.as_str(),
+                "identity"
+                    | "reshape"
+                    | "transpose"
+                    | "slice_by_size"
+                    | "slice_by_index"
+                    | "reverse"
+                    | "concat"
+                    | "split"
+                    | "gather"
+                    | "gather_along_axis"
+                    | "gather_nd"
+                    | "tile"
+                    | "pad"
+                    | "select"
+                    | "squeeze"
+                    | "expand_dims"
+                    | "scatter_along_axis"
+                    | "scatter_nd"
+                    // Half accumulation overflows before sqrt even when the
+                    // final l2Pool2d result is representable in half.
+                    | "l2_pool"
+                    // Half layer normalization and matmul lose small values
+                    // on A12 GPU paths; stored weights remain half precision.
+                    | "layer_norm"
+                    | "matmul"
+                    // Half subtraction can erase represented NaN/infinity
+                    // classes on accelerator-enabled execution paths.
+                    | "sub"
+            );
+            let half = operation.outputs.iter().any(|value| {
+                tensor(value).is_some_and(|t| t.data_type == MilDataType::Float16 as i32)
+            });
+            if !movement || !half {
+                operations.push(operation);
+                continue;
+            }
+            if operation.r#type == "transpose" {
+                use crate::protos::coreml::mil_spec::{tensor_value, value};
+                let permutation = operation
+                    .inputs
+                    .get("perm")
+                    .and_then(|argument| argument.arguments.first())
+                    .and_then(|binding| match &binding.binding {
+                        Some(Binding::Value(value)) => value.value.as_ref(),
+                        _ => None,
+                    })
+                    .and_then(|value| match value {
+                        value::Value::ImmediateValue(value::ImmediateValue {
+                            value: Some(value::immediate_value::Value::Tensor(tensor)),
+                        }) => match &tensor.value {
+                            Some(tensor_value::Value::Ints(values)) => Some(&values.values),
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if permutation.is_some_and(|values| {
+                    values
+                        .iter()
+                        .enumerate()
+                        .all(|(i, &value)| value == i as i32)
+                }) {
+                    // A constant no-op transpose plus narrowing is incorrectly
+                    // folded to a data-free BNNS program by the URL loader.
+                    operation.r#type = mil_ops::DIV.into();
+                    operation.inputs.remove("perm");
+                    operation
+                        .inputs
+                        .insert("y".into(), Self::create_immediate_float(1.0));
+                }
+            }
+            // Repeated concat/scatter inputs share one promotion in this op. Inputs
+            // are visited in name order: MIL keeps them in a HashMap, and the order of
+            // the emitted casts decides which Pipeline child a constant widening joins.
+            let mut promoted = HashMap::<String, String>::new();
+            let mut input_names: Vec<String> = operation.inputs.keys().cloned().collect();
+            input_names.sort_unstable();
+            for input_name in input_names {
+                let argument = operation.inputs.get_mut(&input_name).unwrap();
+                for binding in &mut argument.arguments {
+                    if let Some(Binding::Name(name)) = &mut binding.binding
+                        && let Some(value_type) = types.get(name)
+                        && tensor(value_type)
+                            .is_some_and(|t| t.data_type == MilDataType::Float16 as i32)
+                    {
+                        let wide_name = promoted.entry(name.clone()).or_insert_with(|| {
+                            let mut wide_type = value_type.clone();
+                            wide_type.name = fresh_name(format!("{name}_transport_fp32_{index}"));
+                            widen(&mut wide_type);
+                            let cast_type = if constants.contains(name) {
+                                let mut cast_type = wide_type.clone();
+                                cast_type.name =
+                                    fresh_name(format!("{name}_constant_fp32_{index}"));
+                                cast_type
+                            } else {
+                                wide_type.clone()
+                            };
+                            operations.push(Self::create_cast_operation(
+                                name.clone(),
+                                cast_type.clone(),
+                                "fp32",
+                            ));
+                            if constants.contains(name) {
+                                // Materialize constant transport rather than
+                                // allowing its terminal cast/alias to become a
+                                // data-free BNNS program at model load.
+                                let mut inputs = HashMap::new();
+                                inputs
+                                    .insert("x".into(), Self::create_name_argument(cast_type.name));
+                                inputs.insert("y".into(), Self::create_immediate_float(1.0));
+                                operations.push(Self::create_mil_operation(
+                                    mil_ops::DIV,
+                                    inputs,
+                                    vec![wide_type.clone()],
+                                ));
+                            }
+                            wide_type.name
+                        });
+                        *name = wide_name.clone();
+                    }
+                    if let Some(Binding::Value(value)) = &mut binding.binding {
+                        Self::widen_float16_immediate(value);
+                    }
+                }
+            }
+            let mut casts = Vec::new();
+            for output in &mut operation.outputs {
+                if tensor(output).is_some_and(|t| t.data_type == MilDataType::Float16 as i32) {
+                    let original = output.clone();
+                    output.name = fresh_name(format!("{}_transport_fp32_{index}", output.name));
+                    widen(output);
+                    promoted_results.insert(output.name.clone());
+                    casts.push(Self::create_cast_operation(
+                        output.name.clone(),
+                        original,
+                        "fp16",
+                    ));
+                }
+            }
+            operations.push(operation);
+            operations.extend(casts);
+        }
+        block.operations = operations;
+        promoted_results
+    }
+
+    /// Pad's constant value must use the same precision as its widened input.
+    fn widen_float16_immediate(value: &mut crate::protos::coreml::mil_spec::Value) {
+        use crate::protos::coreml::mil_spec::{
+            DataType as MilDataType, tensor_value, value, value_type,
+        };
+        let Some(ValueType {
+            r#type: Some(value_type::Type::TensorType(tensor_type)),
+        }) = &mut value.r#type
+        else {
+            return;
+        };
+        if tensor_type.data_type != MilDataType::Float16 as i32 {
+            return;
+        }
+        let Some(value::Value::ImmediateValue(value::ImmediateValue {
+            value: Some(value::immediate_value::Value::Tensor(tensor)),
+        })) = &mut value.value
+        else {
+            return;
+        };
+        let Some(tensor_value::Value::Bytes(bytes)) = &tensor.value else {
+            return;
+        };
+        let values = bytes
+            .values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|v| half::f16::from_bits(u16::from_le_bytes([v[0], v[1]])).to_f32())
+            .collect();
+        tensor.value = Some(tensor_value::Value::Floats(tensor_value::RepeatedFloats {
+            values,
+        }));
+        tensor_type.data_type = MilDataType::Float32 as i32;
+    }
+
     /// Map WebNN operation to MIL operation (convenience wrapper without overrides)
     #[allow(dead_code)]
     fn convert_operation(
@@ -1762,8 +2347,6 @@ impl CoremlMlProgramConverter {
             "averagepool2d" => mil_ops::AVG_POOL,
             "maxpool2d" => mil_ops::MAX_POOL,
             "l2pool2d" => mil_ops::L2_POOL,
-            "globalaveragepool" => mil_ops::GLOBAL_AVG_POOL,
-            "globalmaxpool" => mil_ops::GLOBAL_MAX_POOL,
 
             // Normalization
             "batchnormalization" => mil_ops::BATCH_NORM,
@@ -1797,7 +2380,7 @@ impl CoremlMlProgramConverter {
             "cos" => mil_ops::COS,
             "tan" => mil_ops::TAN,
             "erf" => mil_ops::ERF,
-            "reciprocal" => mil_ops::RECIPROCAL,
+            "reciprocal" => mil_ops::DIV,
 
             // Logic operations
             "equal" => mil_ops::EQUAL,
@@ -2360,6 +2943,129 @@ impl CoremlMlProgramConverter {
             int32,
             idx_shape,
         )
+    }
+
+    /// Emit an NHWC `instanceNormalization` as CoreML needs it: transpose the input to NCHW,
+    /// run `instance_norm`, transpose the result back to NHWC. `op` carries the scale and
+    /// bias the native op applies; the runtime-affine lowering passes it without them.
+    /// Returns the output operand.
+    fn push_nhwc_instance_norm(
+        &self,
+        graph_info: &LoweringGraph<'_>,
+        op: &Operation,
+        operand_name_overrides: &HashMap<u32, String>,
+        main_block: &mut Block,
+    ) -> Result<u32, GraphError> {
+        let input_id =
+            op.input_operands()
+                .first()
+                .copied()
+                .ok_or_else(|| GraphError::ConversionFailed {
+                    format: "coreml_mlprogram".to_string(),
+                    reason: "instanceNorm op has no input operand".to_string(),
+                })?;
+        let output_id = op
+            .output_operand()
+            .ok_or_else(|| GraphError::ConversionFailed {
+                format: "coreml_mlprogram".to_string(),
+                reason: "instanceNorm op has no output operand".to_string(),
+            })?;
+        let input_operand =
+            graph_info
+                .operand(input_id)
+                .ok_or_else(|| GraphError::ConversionFailed {
+                    format: "coreml_mlprogram".to_string(),
+                    reason: format!("instanceNorm input operand {} not found", input_id),
+                })?;
+        let output_operand =
+            graph_info
+                .operand(output_id)
+                .ok_or_else(|| GraphError::ConversionFailed {
+                    format: "coreml_mlprogram".to_string(),
+                    reason: format!("instanceNorm output operand {} not found", output_id),
+                })?;
+
+        let input_name =
+            Self::output_name_for_operand(graph_info, input_id, operand_name_overrides);
+        let (output_name, output_type) =
+            Self::create_output_value(graph_info, output_id, operand_name_overrides)?;
+        let dtype = Self::mil_data_type(&input_operand.descriptor.data_type)?;
+
+        // Pre-transpose: NHWC [N,H,W,C] -> NCHW [N,C,H,W], perm=[0,3,1,2]
+        let nchw_in_name = format!("{}_in_nchw", output_name);
+        let nchw_perm = [0u32, 3, 1, 2];
+        let nchw_in_shape = Self::permute_graph_shape(&input_operand.descriptor.shape, &nchw_perm);
+        let nchw_in_dims = Self::mil_dimensions_from_graph_shape(&nchw_in_shape, false);
+        let nchw_in_type = NamedValueType {
+            name: nchw_in_name.clone(),
+            r#type: Some(ValueType {
+                r#type: Some(
+                    crate::protos::coreml::mil_spec::value_type::Type::TensorType(TensorType {
+                        rank: nchw_in_dims.len() as i64,
+                        data_type: dtype,
+                        dimensions: nchw_in_dims,
+                        attributes: HashMap::new(),
+                    }),
+                ),
+            }),
+        };
+        let mut pre_tp: HashMap<String, Argument> = HashMap::new();
+        pre_tp.insert("x".to_string(), Self::create_name_argument(input_name));
+        pre_tp.insert(
+            "perm".to_string(),
+            Self::create_immediate_int_array(&nchw_perm),
+        );
+        main_block.operations.push(Self::create_mil_operation(
+            "transpose",
+            pre_tp,
+            vec![nchw_in_type],
+        ));
+
+        // instance_norm on NCHW intermediate
+        let nchw_out_name = format!("{}_out_nchw", output_name);
+        let nchw_out_perm = [0u32, 3, 1, 2];
+        let nchw_out_shape =
+            Self::permute_graph_shape(&output_operand.descriptor.shape, &nchw_out_perm);
+        let nchw_out_dims = Self::mil_dimensions_from_graph_shape(&nchw_out_shape, false);
+        let nchw_out_type = NamedValueType {
+            name: nchw_out_name.clone(),
+            r#type: Some(ValueType {
+                r#type: Some(
+                    crate::protos::coreml::mil_spec::value_type::Type::TensorType(TensorType {
+                        rank: nchw_out_dims.len() as i64,
+                        data_type: dtype,
+                        dimensions: nchw_out_dims,
+                        attributes: HashMap::new(),
+                    }),
+                ),
+            }),
+        };
+        let mut overrides_nchw = operand_name_overrides.clone();
+        overrides_nchw.insert(input_id, nchw_in_name);
+        let in_names = Self::input_names_for_operation(graph_info, op, &overrides_nchw);
+        let norm_op = self.convert_operation_with_input_names_and_outputs(
+            graph_info,
+            op,
+            &in_names,
+            vec![nchw_out_type],
+            mil_ops::INSTANCE_NORM,
+        )?;
+        main_block.operations.push(norm_op);
+
+        // Post-transpose: NCHW [N,C,H,W] -> NHWC [N,H,W,C], perm=[0,2,3,1]
+        let post_perm = [0u32, 2, 3, 1];
+        let mut post_tp: HashMap<String, Argument> = HashMap::new();
+        post_tp.insert("x".to_string(), Self::create_name_argument(nchw_out_name));
+        post_tp.insert(
+            "perm".to_string(),
+            Self::create_immediate_int_array(&post_perm),
+        );
+        main_block.operations.push(Self::create_mil_operation(
+            "transpose",
+            post_tp,
+            vec![output_type],
+        ));
+        Ok(output_id)
     }
 
     /// Emit `reshape(x, shape)`. Returns `out_name`.
@@ -2997,1198 +3703,6 @@ impl CoremlMlProgramConverter {
         }
     }
 
-    fn emit_concat(
-        block: &mut Block,
-        names: &[String],
-        axis: usize,
-        shape: &[u32],
-        name: String,
-        dtype: i32,
-    ) -> String {
-        block.operations.push(Self::create_mil_operation(
-            "concat",
-            HashMap::from([
-                ("values".into(), Self::create_argument_tuple(names)),
-                ("axis".into(), Self::create_immediate_int(axis as u32)),
-                ("interleave".into(), Self::create_immediate_bool(false)),
-            ]),
-            vec![Self::value_type_for_static_shape(
-                name.clone(),
-                dtype,
-                shape,
-            )],
-        ));
-        name
-    }
-
-    fn emit_int32_bound(
-        block: &mut Block,
-        input: &str,
-        bound: &str,
-        lower: bool,
-        name: String,
-        shape: &[GraphDimension],
-    ) -> String {
-        let bool_t = crate::protos::coreml::mil_spec::DataType::Bool as i32;
-        let dtype = crate::protos::coreml::mil_spec::DataType::Int32 as i32;
-        let count: u32 = shape.iter().map(|d| d.get_static_or_max_size()).product();
-        let flat = Self::rnn_reshape(block, input, &[count], format!("{name}_flat"), dtype);
-        let bound_vector = Self::rnn_reshape(block, bound, &[1], format!("{name}_bound"), dtype);
-        let values = Self::emit_concat(
-            block,
-            &[flat.clone(), bound_vector],
-            0,
-            &[count + 1],
-            format!("{name}_values"),
-            dtype,
-        );
-        let condition = Self::binary_with_graph_shape(
-            block,
-            if lower { "less" } else { "greater" },
-            &flat,
-            bound,
-            format!("{name}_outside"),
-            bool_t,
-            &[GraphDimension::Static(count)],
-        );
-        let indices: Vec<i32> = (0..count).map(|i| i as i32).collect();
-        let indices =
-            Self::emit_int32_const(block, &indices, &[count], format!("{name}_positions"));
-        let selected = format!("{name}_indices");
-        block.operations.push(Self::create_mil_operation(
-            "select",
-            HashMap::from([
-                ("cond".into(), Self::create_name_argument(condition)),
-                ("a".into(), Self::create_immediate_int(count)),
-                ("b".into(), Self::create_name_argument(indices)),
-            ]),
-            vec![Self::value_type_for_static_shape(
-                selected.clone(),
-                dtype,
-                &[count],
-            )],
-        ));
-        let gathered = format!("{name}_gathered");
-        block.operations.push(Self::create_mil_operation(
-            "gather",
-            HashMap::from([
-                ("x".into(), Self::create_name_argument(values)),
-                ("indices".into(), Self::create_name_argument(selected)),
-                ("axis".into(), Self::create_immediate_int(0)),
-                ("batch_dims".into(), Self::create_immediate_int(0)),
-                (
-                    "validate_indices".into(),
-                    Self::create_immediate_bool(false),
-                ),
-            ]),
-            vec![Self::value_type_for_static_shape(
-                gathered.clone(),
-                dtype,
-                &[count],
-            )],
-        ));
-        Self::rnn_reshape(
-            block,
-            &gathered,
-            &shape
-                .iter()
-                .map(|d| d.get_static_or_max_size())
-                .collect::<Vec<_>>(),
-            name,
-            dtype,
-        )
-    }
-
-    fn emit_exact_int32(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<bool, GraphError> {
-        let Some(&input_id) = op.input_operands().first() else {
-            return Ok(false);
-        };
-        let input = graph.operand(input_id).unwrap();
-        if input.descriptor.data_type != DataType::Int32 {
-            return Ok(false);
-        }
-        let kind = op.op_type().to_ascii_lowercase();
-        if !matches!(kind.as_str(), "abs" | "neg" | "relu" | "clamp") {
-            return Ok(false);
-        }
-        let output_id = op.output_operand().unwrap();
-        let (name, ty) = Self::create_output_value(graph, output_id, overrides)?;
-        let shape = &input.descriptor.shape;
-        let dtype = crate::protos::coreml::mil_spec::DataType::Int32 as i32;
-        let input_name = Self::output_name_for_operand(graph, input_id, overrides);
-        let bound = |block: &mut Block, value: i32, tag: &str| {
-            Self::emit_int32_const(block, &[value], &[], format!("{name}_{tag}"))
-        };
-        let result = match kind.as_str() {
-            "abs" | "neg" => {
-                let minimum = bound(block, i32::MIN + 1, "minimum");
-                let clamped = Self::emit_int32_bound(
-                    block,
-                    &input_name,
-                    &minimum,
-                    true,
-                    format!("{name}_saturated"),
-                    shape,
-                );
-                if kind == "abs" {
-                    Self::rnn_unary(
-                        block,
-                        "abs",
-                        &clamped,
-                        name.clone(),
-                        dtype,
-                        &input.descriptor.static_or_max_shape(),
-                    )
-                } else {
-                    let negative_one = bound(block, -1, "negative_one");
-                    Self::binary_with_graph_shape(
-                        block,
-                        "floor_div",
-                        &clamped,
-                        &negative_one,
-                        name.clone(),
-                        dtype,
-                        shape,
-                    )
-                }
-            }
-            "relu" => {
-                let zero = bound(block, 0, "zero");
-                Self::emit_int32_bound(block, &input_name, &zero, true, name.clone(), shape)
-            }
-            _ => {
-                let Operation::Clamp { options, .. } = op else {
-                    unreachable!()
-                };
-                let min = options.as_ref().map_or(f64::NEG_INFINITY, |o| {
-                    Self::parse_clamp_bound(o.min_value.as_ref(), f64::NEG_INFINITY)
-                });
-                let max = options.as_ref().map_or(f64::INFINITY, |o| {
-                    Self::parse_clamp_bound(o.max_value.as_ref(), f64::INFINITY)
-                });
-                let lower = bound(block, min as i32, "lower");
-                let upper = bound(block, max as i32, "upper");
-                let clamped = Self::emit_int32_bound(
-                    block,
-                    &input_name,
-                    &lower,
-                    true,
-                    format!("{name}_lowered"),
-                    shape,
-                );
-                Self::emit_int32_bound(block, &clamped, &upper, false, name.clone(), shape)
-            }
-        };
-        if let Some(last) = block.operations.last_mut() {
-            last.outputs = vec![ty];
-        }
-        debug_assert_eq!(result, name);
-        Ok(true)
-    }
-
-    fn emit_tile_concat(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<(), GraphError> {
-        let Operation::Tile {
-            input, repetitions, ..
-        } = op
-        else {
-            unreachable!()
-        };
-        let operand = graph.operand(*input).unwrap();
-        let dtype = Self::mil_data_type(&operand.descriptor.data_type)?;
-        let output_id = op.output_operand().unwrap();
-        let (out, ty) = Self::create_output_value(graph, output_id, overrides)?;
-        let mut current = Self::output_name_for_operand(graph, *input, overrides);
-        let mut shape = operand.descriptor.static_or_max_shape();
-        for (axis, &repetition) in repetitions.iter().enumerate() {
-            if repetition == 1 {
-                continue;
-            }
-            shape[axis] *= repetition;
-            current = Self::emit_concat(
-                block,
-                &vec![current; repetition as usize],
-                axis,
-                &shape,
-                format!("{out}_axis{axis}"),
-                dtype,
-            );
-        }
-        block.operations.push(Self::create_mil_operation(
-            "identity",
-            HashMap::from([("x".into(), Self::create_name_argument(current))]),
-            vec![ty],
-        ));
-        Ok(())
-    }
-
-    fn emit_nearest_resample(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<(), GraphError> {
-        let Operation::Resample2d { input, options, .. } = op else {
-            unreachable!()
-        };
-        let options = options.clone().unwrap_or_default();
-        let input_operand = graph.operand(*input).unwrap();
-        let dtype = Self::mil_data_type(&input_operand.descriptor.data_type)?;
-        let output_id = op.output_operand().unwrap();
-        let output = graph.operand(output_id).unwrap();
-        let (name, ty) = Self::create_output_value(graph, output_id, overrides)?;
-        let axes = if options.axes.is_empty() {
-            vec![2, 3]
-        } else {
-            options.axes.clone()
-        };
-        let mut shape = input_operand.descriptor.static_or_max_shape();
-        let mut current = Self::output_name_for_operand(graph, *input, overrides);
-        for &axis in &axes {
-            let axis = axis as usize;
-            let source = shape[axis];
-            let destination = output.descriptor.static_or_max_shape()[axis];
-            let scale = destination as f64 / source as f64;
-            let indices: Vec<i32> = (0..destination)
-                .map(|i| {
-                    let coordinate =
-                        ((i as f64 + 0.5) / scale - 0.5).clamp(0.0, source as f64 - 1.0);
-                    (coordinate - 0.5).ceil().max(0.0) as i32
-                })
-                .collect();
-            let indices = Self::emit_int32_const(
-                block,
-                &indices,
-                &[destination],
-                format!("{name}_indices{axis}"),
-            );
-            shape[axis] = destination;
-            let next = format!("{name}_axis{axis}");
-            block.operations.push(Self::create_mil_operation(
-                "gather",
-                HashMap::from([
-                    ("x".into(), Self::create_name_argument(current)),
-                    ("indices".into(), Self::create_name_argument(indices)),
-                    ("axis".into(), Self::create_immediate_int(axis as u32)),
-                    ("batch_dims".into(), Self::create_immediate_int(0)),
-                    (
-                        "validate_indices".into(),
-                        Self::create_immediate_bool(false),
-                    ),
-                ]),
-                vec![Self::value_type_for_static_shape(
-                    next.clone(),
-                    dtype,
-                    &shape,
-                )],
-            ));
-            current = next;
-        }
-        block.operations.push(Self::create_mil_operation(
-            "identity",
-            HashMap::from([("x".into(), Self::create_name_argument(current))]),
-            vec![ty],
-        ));
-        Ok(())
-    }
-
-    fn emit_dilated_pool(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<bool, GraphError> {
-        let options = match op {
-            Operation::AveragePool2d { options, .. }
-            | Operation::MaxPool2d { options, .. }
-            | Operation::L2Pool2d { options, .. } => options.clone().unwrap_or_default(),
-            _ => return Ok(false),
-        };
-        if options.dilations.iter().all(|&d| d == 1) {
-            return Ok(false);
-        }
-        let input_id = op.input_operands()[0];
-        let input = graph.operand(input_id).unwrap();
-        let output_id = op.output_operand().unwrap();
-        let output = graph.operand(output_id).unwrap();
-        let (out, ty) = Self::create_output_value(graph, output_id, overrides)?;
-        let input_shape = input.descriptor.static_or_max_shape();
-        let output_shape = output.descriptor.static_or_max_shape();
-        let (h, w) = if options.layout.eq_ignore_ascii_case("nhwc") {
-            (1, 2)
-        } else {
-            (2, 3)
-        };
-        let kernel = options
-            .window_dimensions
-            .clone()
-            .unwrap_or(vec![input_shape[h], input_shape[w]]);
-        let stride = |axis: usize| options.strides.get(axis).copied().unwrap_or(1);
-        let dilation = |axis: usize| options.dilations.get(axis).copied().unwrap_or(1);
-        let pad = |axis: usize| options.padding.get(axis * 2).copied().unwrap_or(0);
-        let fp32 = crate::protos::coreml::mil_spec::DataType::Float32 as i32;
-        let bool_t = crate::protos::coreml::mil_spec::DataType::Bool as i32;
-        let input_name = Self::output_name_for_operand(graph, input_id, overrides);
-        let input_name = Self::cast_with_graph_shape(
-            block,
-            &input_name,
-            format!("{out}_pool_fp32"),
-            fp32,
-            &input.descriptor.shape,
-        );
-        let mut accumulated: Option<String> = None;
-        let mut counts = vec![0i32; (output_shape[h] * output_shape[w]) as usize];
-        let mut mask_shape = vec![1; input_shape.len()];
-        mask_shape[h] = output_shape[h];
-        mask_shape[w] = output_shape[w];
-        let is_max = matches!(op, Operation::MaxPool2d { .. });
-        let is_l2 = matches!(op, Operation::L2Pool2d { .. });
-        for kh in 0..kernel[0] {
-            for kw in 0..kernel[1] {
-                let mut current = input_name.clone();
-                let mut shape = input_shape.clone();
-                let mut valid = Vec::new();
-                for (position, axis, offset) in [(0, h, kh), (1, w, kw)] {
-                    let coordinates: Vec<i64> = (0..output_shape[axis])
-                        .map(|i| {
-                            i as i64 * stride(position) as i64
-                                + offset as i64 * dilation(position) as i64
-                                - pad(position) as i64
-                        })
-                        .collect();
-                    valid.push(
-                        coordinates
-                            .iter()
-                            .map(|&c| c >= 0 && c < input_shape[axis] as i64)
-                            .collect::<Vec<_>>(),
-                    );
-                    let indices: Vec<i32> = coordinates
-                        .iter()
-                        .map(|&c| c.clamp(0, input_shape[axis] as i64 - 1) as i32)
-                        .collect();
-                    let indices = Self::emit_int32_const(
-                        block,
-                        &indices,
-                        &[output_shape[axis]],
-                        format!("{out}_pool_indices_{kh}_{kw}_{axis}"),
-                    );
-                    shape[axis] = output_shape[axis];
-                    let next = format!("{out}_pool_gather_{kh}_{kw}_{axis}");
-                    block.operations.push(Self::create_mil_operation(
-                        "gather",
-                        HashMap::from([
-                            ("x".into(), Self::create_name_argument(current)),
-                            ("indices".into(), Self::create_name_argument(indices)),
-                            ("axis".into(), Self::create_immediate_int(axis as u32)),
-                            ("batch_dims".into(), Self::create_immediate_int(0)),
-                            (
-                                "validate_indices".into(),
-                                Self::create_immediate_bool(false),
-                            ),
-                        ]),
-                        vec![Self::value_type_for_static_shape(
-                            next.clone(),
-                            fp32,
-                            &shape,
-                        )],
-                    ));
-                    current = next;
-                }
-                let mask: Vec<i32> = valid[0]
-                    .iter()
-                    .flat_map(|&vh| valid[1].iter().map(move |&vw| i32::from(vh && vw)))
-                    .collect();
-                for (count, &value) in counts.iter_mut().zip(&mask) {
-                    *count += value;
-                }
-                let mask_name = Self::emit_int32_const(
-                    block,
-                    &mask,
-                    &mask_shape,
-                    format!("{out}_pool_mask_{kh}_{kw}"),
-                );
-                let mask_name = Self::cast_with_graph_shape(
-                    block,
-                    &mask_name,
-                    format!("{out}_pool_valid_{kh}_{kw}"),
-                    bool_t,
-                    &mask_shape
-                        .iter()
-                        .map(|&d| GraphDimension::Static(d))
-                        .collect::<Vec<_>>(),
-                );
-                let selected = format!("{out}_pool_selected_{kh}_{kw}");
-                block.operations.push(Self::create_mil_operation(
-                    "select",
-                    HashMap::from([
-                        ("cond".into(), Self::create_name_argument(mask_name)),
-                        ("a".into(), Self::create_name_argument(current)),
-                        (
-                            "b".into(),
-                            Self::create_immediate_float(if is_max {
-                                f32::NEG_INFINITY
-                            } else {
-                                0.0
-                            }),
-                        ),
-                    ]),
-                    vec![Self::value_type_for_static_shape(
-                        selected.clone(),
-                        fp32,
-                        &output_shape,
-                    )],
-                ));
-                current = selected;
-                if is_l2 {
-                    current = Self::rnn_binary(
-                        block,
-                        "mul",
-                        &current,
-                        &current,
-                        format!("{out}_pool_square_{kh}_{kw}"),
-                        fp32,
-                        &output_shape,
-                    );
-                }
-                accumulated = Some(if let Some(previous) = accumulated {
-                    Self::rnn_binary(
-                        block,
-                        if is_max { "maximum" } else { "add" },
-                        &previous,
-                        &current,
-                        format!("{out}_pool_sum_{kh}_{kw}"),
-                        fp32,
-                        &output_shape,
-                    )
-                } else {
-                    current
-                });
-            }
-        }
-        let mut result = accumulated.unwrap();
-        if is_l2 {
-            result = Self::rnn_unary(
-                block,
-                "sqrt",
-                &result,
-                format!("{out}_pool_sqrt"),
-                fp32,
-                &output_shape,
-            );
-        } else if !is_max {
-            let count =
-                Self::emit_int32_const(block, &counts, &mask_shape, format!("{out}_pool_count"));
-            let count = Self::cast_with_graph_shape(
-                block,
-                &count,
-                format!("{out}_pool_count_float"),
-                fp32,
-                &mask_shape
-                    .iter()
-                    .map(|&d| GraphDimension::Static(d))
-                    .collect::<Vec<_>>(),
-            );
-            result = Self::rnn_binary(
-                block,
-                "real_div",
-                &result,
-                &count,
-                format!("{out}_pool_average"),
-                fp32,
-                &output_shape,
-            );
-        }
-        block.operations.push(Self::create_cast_operation(
-            result,
-            ty,
-            Self::cast_dtype_string_for_graph_type(&input.descriptor.data_type)?,
-        ));
-        Ok(true)
-    }
-
-    fn emit_edge_pad(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<bool, GraphError> {
-        let Operation::Pad {
-            input,
-            beginning_padding,
-            ending_padding,
-            options,
-            ..
-        } = op
-        else {
-            return Ok(false);
-        };
-        let mode = options.as_ref().map(|o| o.mode).unwrap_or_default();
-        if matches!(mode, MLPaddingMode::Constant) {
-            return Ok(false);
-        }
-        let operand = graph.operand(*input).unwrap();
-        let dtype = Self::mil_data_type(&operand.descriptor.data_type)?;
-        let output_id = op.output_operand().unwrap();
-        let (name, ty) = Self::create_output_value(graph, output_id, overrides)?;
-        let mut shape = operand.descriptor.static_or_max_shape();
-        let mut current = Self::output_name_for_operand(graph, *input, overrides);
-        for axis in 0..shape.len() {
-            let before = beginning_padding[axis];
-            let after = ending_padding[axis];
-            if before == 0 && after == 0 {
-                continue;
-            }
-            let length = shape[axis] as i64;
-            let indices: Vec<i32> = (-(before as i64)..length + after as i64)
-                .map(|i| {
-                    if matches!(mode, MLPaddingMode::Edge) {
-                        i.clamp(0, length - 1) as i32
-                    } else {
-                        (if i < 0 {
-                            -i
-                        } else if i >= length {
-                            2 * length - i - 2
-                        } else {
-                            i
-                        }) as i32
-                    }
-                })
-                .collect();
-            shape[axis] += before + after;
-            let indices = Self::emit_int32_const(
-                block,
-                &indices,
-                &[shape[axis]],
-                format!("{name}_pad_indices{axis}"),
-            );
-            let next = format!("{name}_pad_axis{axis}");
-            block.operations.push(Self::create_mil_operation(
-                "gather",
-                HashMap::from([
-                    ("x".into(), Self::create_name_argument(current)),
-                    ("indices".into(), Self::create_name_argument(indices)),
-                    ("axis".into(), Self::create_immediate_int(axis as u32)),
-                    ("batch_dims".into(), Self::create_immediate_int(0)),
-                    (
-                        "validate_indices".into(),
-                        Self::create_immediate_bool(false),
-                    ),
-                ]),
-                vec![Self::value_type_for_static_shape(
-                    next.clone(),
-                    dtype,
-                    &shape,
-                )],
-            ));
-            current = next;
-        }
-        block.operations.push(Self::create_mil_operation(
-            "identity",
-            HashMap::from([("x".into(), Self::create_name_argument(current))]),
-            vec![ty],
-        ));
-        Ok(true)
-    }
-
-    fn emit_int32_triangular(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<bool, GraphError> {
-        let Operation::Triangular { input, options, .. } = op else {
-            return Ok(false);
-        };
-        let operand = graph.operand(*input).unwrap();
-        if operand.descriptor.data_type != DataType::Int32 {
-            return Ok(false);
-        }
-        let shape = operand.descriptor.static_or_max_shape();
-        let rank = shape.len();
-        let upper = options.as_ref().and_then(|o| o.upper).unwrap_or(true);
-        let diagonal = options.as_ref().map_or(0, |o| o.diagonal) as i64;
-        let (name, ty) = Self::create_output_value(graph, op.output_operand().unwrap(), overrides)?;
-        let input_name = Self::output_name_for_operand(graph, *input, overrides);
-        let dtype = crate::protos::coreml::mil_spec::DataType::Int32 as i32;
-        let mut rows = Vec::new();
-        let mut row_shape = shape.clone();
-        row_shape[rank - 2] = 1;
-        for row in 0..shape[rank - 2] {
-            let split =
-                (row as i64 + diagonal + i64::from(!upper)).clamp(0, shape[rank - 1] as i64) as u32;
-            let mut pieces = Vec::new();
-            for (piece, (start, end)) in [(0, split), (split, shape[rank - 1])]
-                .into_iter()
-                .enumerate()
-            {
-                if start == end {
-                    continue;
-                }
-                let mut piece_shape = row_shape.clone();
-                piece_shape[rank - 1] = end - start;
-                let keep = if upper { piece == 1 } else { piece == 0 };
-                let piece_name = format!("{name}_row{row}_piece{piece}");
-                pieces.push(if keep {
-                    let mut begin = vec![0; rank];
-                    begin[rank - 2] = row;
-                    begin[rank - 1] = start;
-                    Self::rnn_slice(block, &input_name, &begin, &piece_shape, piece_name, dtype)
-                } else {
-                    Self::rnn_zeros(block, &piece_shape, piece_name, dtype)
-                });
-            }
-            rows.push(Self::emit_concat(
-                block,
-                &pieces,
-                rank - 1,
-                &row_shape,
-                format!("{name}_row{row}"),
-                dtype,
-            ));
-        }
-        Self::emit_concat(block, &rows, rank - 2, &shape, name, dtype);
-        block.operations.last_mut().unwrap().outputs = vec![ty];
-        Ok(true)
-    }
-
-    fn emit_round_even(
-        block: &mut Block,
-        input: &str,
-        output: NamedValueType,
-        shape: &[GraphDimension],
-        dtype: i32,
-    ) {
-        let scalar_shape = [GraphDimension::Static(1)];
-        let input_name;
-        let (input, shape) = if shape.is_empty() {
-            input_name = Self::rnn_reshape(
-                block,
-                input,
-                &[1],
-                format!("{}_input1d", output.name),
-                dtype,
-            );
-            (input_name.as_str(), scalar_shape.as_slice())
-        } else {
-            (input, shape)
-        };
-        let bool_type = crate::protos::coreml::mil_spec::DataType::Bool as i32;
-        let prefix = output.name.clone();
-        let scalar = |value| {
-            if dtype == crate::protos::coreml::mil_spec::DataType::Float16 as i32 {
-                Self::create_immediate_float16(value)
-            } else {
-                Self::create_immediate_float(value)
-            }
-        };
-        let emit = |block: &mut Block, kind: &str, tag: &str, inputs, value_type| {
-            let name = format!("{prefix}_{tag}");
-            let ty = Self::create_named_value_type(name.clone(), value_type, shape, false);
-            block
-                .operations
-                .push(Self::create_mil_operation(kind, inputs, vec![ty]));
-            name
-        };
-        let binary = |block: &mut Block, kind: &str, tag: &str, x: &str, y, value_type| {
-            emit(
-                block,
-                kind,
-                tag,
-                HashMap::from([
-                    ("x".to_string(), Self::create_name_argument(x.to_string())),
-                    ("y".to_string(), y),
-                ]),
-                value_type,
-            )
-        };
-        let floor = emit(
-            block,
-            "floor",
-            "floor",
-            HashMap::from([(
-                "x".to_string(),
-                Self::create_name_argument(input.to_string()),
-            )]),
-            dtype,
-        );
-        let fraction = binary(
-            block,
-            "sub",
-            "fraction",
-            input,
-            Self::create_name_argument(floor.clone()),
-            dtype,
-        );
-        let half_floor = binary(block, "mul", "half_floor", &floor, scalar(0.5), dtype);
-        let half_floor = emit(
-            block,
-            "floor",
-            "half_floor_int",
-            HashMap::from([("x".to_string(), Self::create_name_argument(half_floor))]),
-            dtype,
-        );
-        let even_floor = binary(block, "mul", "even_floor", &half_floor, scalar(2.0), dtype);
-        let odd = binary(
-            block,
-            "not_equal",
-            "odd",
-            &floor,
-            Self::create_name_argument(even_floor),
-            bool_type,
-        );
-        let tie = binary(block, "equal", "tie", &fraction, scalar(0.5), bool_type);
-        let odd_tie = binary(
-            block,
-            "logical_and",
-            "odd_tie",
-            &tie,
-            Self::create_name_argument(odd),
-            bool_type,
-        );
-        let above = binary(block, "greater", "above", &fraction, scalar(0.5), bool_type);
-        let increment = binary(
-            block,
-            "logical_or",
-            "increment",
-            &above,
-            Self::create_name_argument(odd_tie),
-            bool_type,
-        );
-        let ceiling = binary(block, "add", "ceiling", &floor, scalar(1.0), dtype);
-        let rounded = emit(
-            block,
-            "select",
-            "rounded",
-            HashMap::from([
-                ("cond".to_string(), Self::create_name_argument(increment)),
-                ("a".to_string(), Self::create_name_argument(ceiling)),
-                ("b".to_string(), Self::create_name_argument(floor)),
-            ]),
-            dtype,
-        );
-        let is_zero = binary(block, "equal", "is_zero", &rounded, scalar(0.0), bool_type);
-        let signed_zero = binary(block, "mul", "signed_zero", input, scalar(0.0), dtype);
-        block.operations.push(Self::create_mil_operation(
-            "select",
-            HashMap::from([
-                ("cond".to_string(), Self::create_name_argument(is_zero)),
-                ("a".to_string(), Self::create_name_argument(signed_zero)),
-                ("b".to_string(), Self::create_name_argument(rounded)),
-            ]),
-            vec![output],
-        ));
-    }
-
-    fn emit_reduce_log_sum(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<(), GraphError> {
-        let Operation::ReduceLogSum { input, options, .. } = op else {
-            unreachable!();
-        };
-        let input_operand = graph.operand(*input).unwrap();
-        let output_id = op.output_operand().unwrap();
-        let (output_name, output_type) = Self::create_output_value(graph, output_id, overrides)?;
-        let mut input_name = Self::output_name_for_operand(graph, *input, overrides);
-        let is_half = input_operand.descriptor.data_type == DataType::Float16;
-        let shape = if input_operand.descriptor.shape.is_empty() {
-            vec![GraphDimension::Static(1)]
-        } else {
-            input_operand.descriptor.shape.clone()
-        };
-        if input_operand.descriptor.shape.is_empty() {
-            input_name = Self::rnn_reshape(
-                block,
-                &input_name,
-                &[1],
-                format!("{output_name}_input1d"),
-                Self::mil_data_type(&input_operand.descriptor.data_type)?,
-            );
-        }
-        if is_half {
-            input_name = Self::cast_with_graph_shape(
-                block,
-                &input_name,
-                format!("{output_name}_fp32"),
-                crate::protos::coreml::mil_spec::DataType::Float32 as i32,
-                &shape,
-            );
-        }
-        let log_type = if is_half {
-            Self::create_value_with_mil_type(
-                graph,
-                output_id,
-                format!("{output_name}_log"),
-                crate::protos::coreml::mil_spec::DataType::Float32 as i32,
-            )?
-        } else {
-            output_type.clone()
-        };
-        let rank = input_operand.descriptor.shape.len();
-        let axes = options.as_ref().and_then(|o| o.axes.as_ref());
-        let sum_name = if rank == 0 || axes.is_some_and(|a| a.is_empty()) {
-            input_name
-        } else {
-            let name = format!("{output_name}_sum");
-            let mut inputs = HashMap::from([
-                ("x".to_string(), Self::create_name_argument(input_name)),
-                (
-                    "keep_dims".to_string(),
-                    Self::create_immediate_bool(
-                        options.as_ref().is_some_and(|o| o.keep_dimensions),
-                    ),
-                ),
-            ]);
-            if let Some(axes) = axes {
-                inputs.insert("axes".to_string(), Self::create_immediate_int_array(axes));
-            }
-            let mut sum_type = log_type.clone();
-            sum_type.name = name.clone();
-            block.operations.push(Self::create_mil_operation(
-                "reduce_sum",
-                inputs,
-                vec![sum_type],
-            ));
-            name
-        };
-        // Native reduce_log_sum adds an epsilon, changing small and zero sums.
-        block.operations.push(Self::create_mil_operation(
-            "log",
-            HashMap::from([
-                ("x".to_string(), Self::create_name_argument(sum_name)),
-                ("epsilon".to_string(), Self::create_immediate_float(0.0)),
-            ]),
-            vec![log_type.clone()],
-        ));
-        if is_half {
-            block.operations.push(Self::create_cast_operation(
-                log_type.name,
-                output_type,
-                "fp16",
-            ));
-        }
-        Ok(())
-    }
-
-    fn emit_normalization(
-        graph: &LoweringGraph<'_>,
-        op: &Operation,
-        overrides: &HashMap<u32, String>,
-        block: &mut Block,
-    ) -> Result<(), GraphError> {
-        use crate::protos::coreml::mil_spec::DataType as MilType;
-        let input_id = op.input_operands()[0];
-        let input = graph.operand(input_id).unwrap();
-        let physical_shape = if input.descriptor.shape.is_empty() {
-            vec![GraphDimension::Static(1)]
-        } else {
-            input.descriptor.shape.clone()
-        };
-        let shape = &physical_shape;
-        let rank = shape.len();
-        let (axes, affine_axes, epsilon, scale, bias) = match op {
-            Operation::LayerNormalization { options, .. } => {
-                let axes = options
-                    .as_ref()
-                    .and_then(|o| o.axes.clone())
-                    .unwrap_or_else(|| {
-                        if rank > 1 {
-                            (1..rank as u32).collect()
-                        } else {
-                            vec![0]
-                        }
-                    });
-                (
-                    axes.clone(),
-                    axes,
-                    options.as_ref().map_or(1e-5, |o| o.epsilon),
-                    options.as_ref().and_then(|o| o.scale),
-                    options.as_ref().and_then(|o| o.bias),
-                )
-            }
-            Operation::InstanceNormalization { options, .. } => {
-                let channel = if options
-                    .as_ref()
-                    .is_some_and(|o| o.layout.eq_ignore_ascii_case("nhwc"))
-                {
-                    rank - 1
-                } else {
-                    1
-                };
-                (
-                    (1..rank as u32)
-                        .filter(|&a| a as usize != channel)
-                        .collect(),
-                    vec![channel as u32],
-                    options.as_ref().map_or(1e-5, |o| o.epsilon),
-                    options.as_ref().and_then(|o| o.scale),
-                    options.as_ref().and_then(|o| o.bias),
-                )
-            }
-            _ => unreachable!(),
-        };
-        let output_id = op.output_operand().unwrap();
-        let (output_name, output_type) = Self::create_output_value(graph, output_id, overrides)?;
-        let fp32 = MilType::Float32 as i32;
-        let mut input_name = Self::output_name_for_operand(graph, input_id, overrides);
-        if input.descriptor.shape.is_empty() {
-            input_name = Self::rnn_reshape(
-                block,
-                &input_name,
-                &[1],
-                format!("{output_name}_input1d"),
-                Self::mil_data_type(&input.descriptor.data_type)?,
-            );
-        }
-        let x = Self::cast_with_graph_shape(
-            block,
-            &input_name,
-            format!("{output_name}_norm_x"),
-            fp32,
-            shape,
-        );
-        let mut reduced_shape = shape.clone();
-        for &axis in &axes {
-            reduced_shape[axis as usize] = GraphDimension::Static(1);
-        }
-        let reduce = |block: &mut Block, kind: &str, x: &str, name: String| {
-            if axes.is_empty() {
-                return x.to_string();
-            }
-            let inputs = HashMap::from([
-                ("x".to_string(), Self::create_name_argument(x.to_string())),
-                ("axes".to_string(), Self::create_immediate_int_array(&axes)),
-                ("keep_dims".to_string(), Self::create_immediate_bool(true)),
-            ]);
-            let ty = Self::create_named_value_type(name.clone(), fp32, &reduced_shape, false);
-            block
-                .operations
-                .push(Self::create_mil_operation(kind, inputs, vec![ty]));
-            name
-        };
-        let x = if epsilon == 0.0 {
-            let absolute = format!("{output_name}_absolute");
-            block.operations.push(Self::create_mil_operation(
-                "abs",
-                HashMap::from([("x".to_string(), Self::create_name_argument(x.clone()))]),
-                vec![Self::create_named_value_type(
-                    absolute.clone(),
-                    fp32,
-                    shape,
-                    false,
-                )],
-            ));
-            let magnitude = reduce(
-                block,
-                "reduce_max",
-                &absolute,
-                format!("{output_name}_magnitude"),
-            );
-            let scale = format!("{output_name}_magnitude_nonzero");
-            block.operations.push(Self::create_mil_operation(
-                "maximum",
-                HashMap::from([
-                    ("x".to_string(), Self::create_name_argument(magnitude)),
-                    (
-                        "y".to_string(),
-                        Self::create_immediate_float(f32::MIN_POSITIVE),
-                    ),
-                ]),
-                vec![Self::create_named_value_type(
-                    scale.clone(),
-                    fp32,
-                    &reduced_shape,
-                    false,
-                )],
-            ));
-            Self::binary_with_graph_shape(
-                block,
-                "real_div",
-                &x,
-                &scale,
-                format!("{output_name}_rescaled"),
-                fp32,
-                shape,
-            )
-        } else {
-            x
-        };
-        let mean = reduce(block, "reduce_mean", &x, format!("{output_name}_mean"));
-        let centered = Self::binary_with_graph_shape(
-            block,
-            "sub",
-            &x,
-            &mean,
-            format!("{output_name}_centered"),
-            fp32,
-            shape,
-        );
-        let squared = Self::binary_with_graph_shape(
-            block,
-            "mul",
-            &centered,
-            &centered,
-            format!("{output_name}_squared"),
-            fp32,
-            shape,
-        );
-        let variance = reduce(
-            block,
-            "reduce_mean",
-            &squared,
-            format!("{output_name}_variance"),
-        );
-        let adjusted = format!("{output_name}_variance_epsilon");
-        block.operations.push(Self::create_mil_operation(
-            "add",
-            HashMap::from([
-                ("x".to_string(), Self::create_name_argument(variance)),
-                (
-                    "y".to_string(),
-                    Self::create_immediate_float(epsilon as f32),
-                ),
-            ]),
-            vec![Self::create_named_value_type(
-                adjusted.clone(),
-                fp32,
-                &reduced_shape,
-                false,
-            )],
-        ));
-        let denominator = format!("{output_name}_denominator");
-        block.operations.push(Self::create_mil_operation(
-            "sqrt",
-            HashMap::from([("x".to_string(), Self::create_name_argument(adjusted))]),
-            vec![Self::create_named_value_type(
-                denominator.clone(),
-                fp32,
-                &reduced_shape,
-                false,
-            )],
-        ));
-        let mut current = Self::binary_with_graph_shape(
-            block,
-            "real_div",
-            &centered,
-            &denominator,
-            format!("{output_name}_normalized"),
-            fp32,
-            shape,
-        );
-        if input.descriptor.data_type == DataType::Float16 && (scale.is_some() || bias.is_some()) {
-            // Prevent CoreML from fusing affine normalization incorrectly for subnormal fp16 inputs.
-            let rounded = Self::cast_with_graph_shape(
-                block,
-                &current,
-                format!("{output_name}_normalized_fp16"),
-                MilType::Float16 as i32,
-                shape,
-            );
-            current = Self::cast_with_graph_shape(
-                block,
-                &rounded,
-                format!("{output_name}_affine_fp32"),
-                fp32,
-                shape,
-            );
-        }
-        for (parameter, kind, tag) in [(scale, "mul", "scale"), (bias, "add", "bias")] {
-            let Some(id) = parameter else { continue };
-            let operand = graph.operand(id).unwrap();
-            let name = Self::output_name_for_operand(graph, id, overrides);
-            let name = Self::cast_with_graph_shape(
-                block,
-                &name,
-                format!("{output_name}_{tag}_fp32"),
-                fp32,
-                &operand.descriptor.shape,
-            );
-            let parameter_shape = operand.descriptor.static_or_max_shape();
-            let count: u32 = parameter_shape.iter().product();
-            let name = Self::rnn_reshape(
-                block,
-                &name,
-                &[count],
-                format!("{output_name}_{tag}_flat"),
-                fp32,
-            );
-            let dimensions: Vec<u32> = shape.iter().map(|d| d.get_static_or_max_size()).collect();
-            let total: u32 = dimensions.iter().product();
-            let mut indices = Vec::with_capacity(total as usize);
-            for flat in 0..total {
-                let mut coordinates = vec![0; dimensions.len()];
-                let mut remainder = flat;
-                for axis in (0..dimensions.len()).rev() {
-                    coordinates[axis] = remainder % dimensions[axis];
-                    remainder /= dimensions[axis];
-                }
-                let mut index = 0;
-                for (position, &axis) in affine_axes.iter().enumerate() {
-                    index = index * parameter_shape[position] + coordinates[axis as usize];
-                }
-                indices.push(index as i32);
-            }
-            let indices = Self::emit_int32_const(
-                block,
-                &indices,
-                &dimensions,
-                format!("{output_name}_{tag}_indices"),
-            );
-            let broadcast = format!("{output_name}_{tag}_broadcast");
-            block.operations.push(Self::create_mil_operation(
-                "gather",
-                HashMap::from([
-                    ("x".into(), Self::create_name_argument(name)),
-                    ("indices".into(), Self::create_name_argument(indices)),
-                    ("axis".into(), Self::create_immediate_int(0)),
-                    ("batch_dims".into(), Self::create_immediate_int(0)),
-                    (
-                        "validate_indices".into(),
-                        Self::create_immediate_bool(false),
-                    ),
-                ]),
-                vec![Self::create_named_value_type(
-                    broadcast.clone(),
-                    fp32,
-                    shape,
-                    false,
-                )],
-            ));
-            current = Self::binary_with_graph_shape(
-                block,
-                kind,
-                &current,
-                &broadcast,
-                format!("{output_name}_{tag}_applied"),
-                fp32,
-                shape,
-            );
-        }
-        if input.descriptor.data_type == DataType::Float16 {
-            block
-                .operations
-                .push(Self::create_cast_operation(current, output_type, "fp16"));
-        } else {
-            block.operations.push(Self::create_mil_operation(
-                "identity",
-                HashMap::from([("x".to_string(), Self::create_name_argument(current))]),
-                vec![output_type],
-            ));
-        }
-        Ok(())
-    }
-
     /// Lower `reduceLogSumExp` using the numerically stable max-shift identity:
     ///
     /// `log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))`.
@@ -4357,10 +3871,7 @@ impl CoremlMlProgramConverter {
             Self::create_named_value_type(log_name.clone(), dtype, &keep_dims_shape, false);
         let mut log_inputs = HashMap::new();
         log_inputs.insert("x".to_string(), Self::create_name_argument(sum_name));
-        log_inputs.insert(
-            "epsilon".to_string(),
-            Self::create_immediate_float(DEFAULT_EPSILON),
-        );
+        log_inputs.insert("epsilon".to_string(), Self::create_immediate_float(0.0));
         main_block.operations.push(Self::create_mil_operation(
             mil_ops::LOG,
             log_inputs,
@@ -4726,13 +4237,7 @@ impl CoremlMlProgramConverter {
         let round_name = format!("{}_q_round", output_name);
         let round_type =
             Self::value_type_for_static_shape(round_name.clone(), float_dtype, &interleaved_input);
-        let mut round_inputs = HashMap::new();
-        round_inputs.insert("x".to_string(), Self::create_name_argument(div_name));
-        main_block.operations.push(Self::create_mil_operation(
-            mil_ops::ROUND_EVEN,
-            round_inputs,
-            vec![round_type],
-        ));
+        Self::emit_round_even(graph, main_block, div_name, round_type);
 
         // 4. add the zero_point (cast to float, reshaped), if present.
         let biased_name = if let Some(zp_id) = zp_id {
@@ -5748,20 +5253,6 @@ impl CoremlMlProgramConverter {
                 // 3. add beta * C if C is provided
             }
 
-            // Global pooling operations (reduce over spatial dimensions)
-            Operation::GlobalAveragePool { .. } | Operation::GlobalMaxPool { .. } => {
-                if !input_names.is_empty() {
-                    inputs.insert("x".to_string(), Self::create_argument(&input_names[0]));
-                }
-                // Global pooling reduces over spatial dimensions (2, 3) for NCHW format
-                inputs.insert(
-                    "axes".to_string(),
-                    Self::create_immediate_int_array(&[2, 3]),
-                );
-                // Keep dimensions to maintain rank
-                inputs.insert("keep_dims".to_string(), Self::create_immediate_bool(true));
-            }
-
             // Softmax operation (axis is required by WebNN spec)
             Operation::Softmax { axis, .. } => {
                 if !input_names.is_empty() {
@@ -5806,12 +5297,24 @@ impl CoremlMlProgramConverter {
 
             Operation::Reciprocal { .. } => {
                 if !input_names.is_empty() {
-                    inputs.insert("x".to_string(), Self::create_argument(&input_names[0]));
+                    inputs.insert("y".to_string(), Self::create_argument(&input_names[0]));
                 }
-                // Reciprocal requires epsilon parameter (default to 1e-45 for numerical stability)
+                // MIL inverse loses the sign of -0 on older CoreML stacks,
+                // even with epsilon=-0. Division implements WebNN's 1/x. Native
+                // float16 divides in float16; exact float16 widens the operand.
+                let native_half = !graph.exact_float16
+                    && op
+                        .input_operands()
+                        .first()
+                        .and_then(|&id| graph.operand(id))
+                        .is_some_and(|operand| operand.descriptor.data_type == DataType::Float16);
                 inputs.insert(
-                    "epsilon".to_string(),
-                    Self::create_immediate_float(DEFAULT_EPSILON),
+                    "x".to_string(),
+                    if native_half {
+                        Self::create_immediate_float16(1.0)
+                    } else {
+                        Self::create_immediate_float(1.0)
+                    },
                 );
             }
 
@@ -5820,10 +5323,10 @@ impl CoremlMlProgramConverter {
                 if !input_names.is_empty() {
                     inputs.insert("x".to_string(), Self::create_argument(&input_names[0]));
                 }
-                // CoreML log requires epsilon parameter (default to 1e-45 for numerical stability)
+                // WebNN specifies log(x), not log(x + epsilon).
                 inputs.insert(
                     "epsilon".to_string(),
-                    Self::create_immediate_float(DEFAULT_EPSILON),
+                    Self::create_immediate_float(0.0),
                 );
             }
 
@@ -6298,19 +5801,19 @@ impl CoremlMlProgramConverter {
                             Self::create_argument(&operand_name(graph, bias_id)),
                         );
                     }
-                    let use_f16 = op
-                        .input_operands()
-                        .first()
-                        .and_then(|&id| graph.operand(id))
-                        .map(|o| o.descriptor.data_type == DataType::Float16)
-                        .unwrap_or(false);
-                    let eps_arg = if use_f16 {
-                        Self::create_immediate_float16(opts.epsilon as f32)
-                    } else {
-                        Self::create_immediate_float(opts.epsilon as f32)
-                    };
-                    inputs.insert("epsilon".to_string(), eps_arg);
                 }
+                let use_f16 = op
+                    .input_operands()
+                    .first()
+                    .and_then(|&id| graph.operand(id))
+                    .is_some_and(|o| o.descriptor.data_type == DataType::Float16);
+                let epsilon = options.as_ref().map_or(1e-5, |o| o.epsilon as f32);
+                let eps_arg = if use_f16 {
+                    Self::create_immediate_float16(epsilon)
+                } else {
+                    Self::create_immediate_float(epsilon)
+                };
+                inputs.insert("epsilon".to_string(), eps_arg);
 
                 // Add axes parameter (REQUIRED by CoreML, must not be empty;
                 // empty axes are caught before this point).
@@ -7098,37 +6601,56 @@ impl CoremlMlProgramConverter {
     }
 }
 
-impl super::GraphConverter for CoremlMlProgramConverter {
-    fn format(&self) -> &'static str {
-        "coreml"
+impl CoremlMlProgramConverter {
+    fn convert_with_precision_boundaries(
+        &self,
+        graph: &LoweringGraph<'_>,
+        weights: &mut super::WeightFileBuilder,
+    ) -> Result<Model, GraphError> {
+        let mut model = self.convert_program(
+            graph,
+            &graph.input_operands,
+            &graph.output_operands,
+            &graph.operations,
+            weights,
+        )?;
+        if graph.exact_float16 {
+            // Exact float16 rounds constant narrowings on the host; native float16
+            // leaves them to Core ML, as before.
+            Self::fold_constant_half_casts(graph, &mut model, weights)?;
+        }
+        let promoted = if !graph.exact_float16 {
+            std::collections::HashSet::new()
+        } else if let Some(crate::protos::coreml::specification::model::Type::MlProgram(program)) =
+            &mut model.r#type
+        {
+            let function = program.functions.get_mut("main").unwrap();
+            let mut block = function
+                .block_specializations
+                .remove(&function.opset)
+                .unwrap();
+            let promoted = Self::preserve_float16_transport(function, &mut block);
+            function
+                .block_specializations
+                .insert(function.opset.clone(), block);
+            promoted
+        } else {
+            std::collections::HashSet::new()
+        };
+        self.materialize_precision_boundaries(graph, model, &promoted)
     }
 
-    fn convert(&self, graph_info: &GraphInfo) -> Result<super::ConvertedGraph, GraphError> {
+    fn convert_program(
+        &self,
+        graph_info: &LoweringGraph<'_>,
+        input_operands: &[u32],
+        output_operands: &[u32],
+        operations: &[Operation],
+        weight_builder: &mut super::WeightFileBuilder,
+    ) -> Result<Model, GraphError> {
         if !crate::graph::dynamic_inputs_enabled() && graph_info.has_dynamic_dimensions() {
             return Err(GraphError::DynamicInputsFeatureDisabled);
         }
-        // Fold transposes, reshapes and casts of constants into new constants first: the
-        // Neural Engine admits `matmul(x, const)` but not `matmul(x, transpose(const))`, and
-        // the literal lowering would also transpose the weight on every dispatch.
-        let folded = super::coreml_constant_fold::fold_constant_views(graph_info);
-        let graph_info = folded.as_ref().unwrap_or(graph_info);
-        let lowering_graph = LoweringGraph::new(graph_info)?;
-        let graph_info = &lowering_graph;
-
-        // Create weight file builder for Float16 constants
-        let mut weight_builder = super::WeightFileBuilder::new();
-        // Upper bound: every constant blob-written, plus a 64-byte metadata
-        // block and up-to-64-byte alignment padding each. Reserved capacity is
-        // virtual until written, so overshooting for immediate-value constants
-        // costs nothing.
-        weight_builder.reserve(
-            graph_info
-                .constant_operand_ids_to_handles
-                .values()
-                .map(|c| c.data.len() + 128)
-                .sum(),
-        );
-
         // Create MLProgram
         let mut program = Program {
             version: 1,
@@ -7144,7 +6666,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         // graph representation inside the main block.
         let mut operand_name_overrides: HashMap<u32, String> = HashMap::new();
 
-        for &output_id in &graph_info.output_operands {
+        for &output_id in output_operands {
             if let Some(operand) = graph_info.operand(output_id) {
                 let graph_mil_type = Self::graph_value_mil_type(&operand.descriptor.data_type)?;
                 // Wide ints (int64/uint32/uint64) are int32 both inside the graph and
@@ -7162,7 +6684,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         }
 
         // Add function inputs from graph inputs
-        for &input_id in &graph_info.input_operands {
+        for &input_id in input_operands {
             let operand =
                 graph_info
                     .operand(input_id)
@@ -7187,7 +6709,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         let mut int32_proxy_output_names: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for &input_id in &graph_info.input_operands {
+        for &input_id in input_operands {
             let operand =
                 graph_info
                     .operand(input_id)
@@ -7238,7 +6760,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         let mut scale_ids_to_squeeze: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
         let mut zp_id_to_dtype: HashMap<u32, DataType> = HashMap::new();
-        for op in &graph_info.operations {
+        for op in operations {
             let op_lower = op.op_type().to_lowercase();
             if matches!(op_lower.as_str(), "quantizelinear" | "dequantizelinear") {
                 let input_ids = op.input_operands();
@@ -7328,7 +6850,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
 
         // Gather/GatherElements: CoreML only accepts int32 (or smaller) for indices.
         // If indices are a constant with uint32 or int64 type, coerce them to int32.
-        for op in &graph_info.operations {
+        for op in operations {
             let op_lower = op.op_type().to_lowercase();
             if (op_lower == "gather" || op_lower == "gatherelements")
                 && let Some(&idx_id) = op.input_operands().get(1)
@@ -7419,7 +6941,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     *operand_id,
                     &modified_operand,
                     final_data_ref,
-                    &mut weight_builder,
+                    weight_builder,
                 )?;
                 main_block.operations.push(const_op);
             } else {
@@ -7428,7 +6950,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     *operand_id,
                     operand,
                     constant_data,
-                    &mut weight_builder,
+                    weight_builder,
                 )?;
                 main_block.operations.push(const_op);
             }
@@ -7442,7 +6964,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
 
         // First pass: Handle filter layout transformations for conv operations
 
-        for op in &graph_info.operations {
+        for op in operations {
             let op_type_lower = op.op_type().to_lowercase();
 
             if (op_type_lower == "conv2d" || op_type_lower == "convtranspose2d")
@@ -7656,8 +7178,359 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         let mut pad_unfused: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         // Convert all operations to MIL operations
-        for op in &graph_info.operations {
+        for op in operations {
             let op_type_lower = op.op_type().to_lowercase();
+
+            if let Operation::RoundEven { input, .. } = op {
+                let output_id =
+                    op.output_operand()
+                        .ok_or_else(|| GraphError::ConversionFailed {
+                            format: "coreml_mlprogram".into(),
+                            reason: "roundEven has no output operand".into(),
+                        })?;
+                let (_, output) =
+                    Self::create_output_value(graph_info, output_id, &operand_name_overrides)?;
+                Self::emit_round_even(
+                    graph_info,
+                    &mut main_block,
+                    Self::output_name_for_operand(graph_info, *input, &operand_name_overrides),
+                    output,
+                );
+                if let Some((pending_ops, transposed_name)) = deferred_transposes.remove(&output_id)
+                {
+                    main_block.operations.extend(pending_ops);
+                    operand_name_overrides.insert(output_id, transposed_name);
+                }
+                continue;
+            }
+
+            if let Operation::Tanh { input, .. } = op
+                && graph_info
+                    .operand(*input)
+                    .is_some_and(|operand| operand.descriptor.data_type == DataType::Float32)
+            {
+                let output_id =
+                    op.output_operand()
+                        .ok_or_else(|| GraphError::ConversionFailed {
+                            format: "coreml_mlprogram".into(),
+                            reason: "tanh has no output".into(),
+                        })?;
+                let (_, output_type) =
+                    Self::create_output_value(graph_info, output_id, &operand_name_overrides)?;
+                Self::append_nan_preserving_tanh(
+                    graph_info,
+                    &mut main_block,
+                    Self::output_name_for_operand(graph_info, *input, &operand_name_overrides),
+                    output_type,
+                );
+                if let Some((pending, name)) = deferred_transposes.remove(&output_id) {
+                    main_block.operations.extend(pending);
+                    operand_name_overrides.insert(output_id, name);
+                }
+                continue;
+            }
+
+            if let Operation::Sign { input, .. } = op
+                && graph_info.operand(*input).is_some_and(|value| {
+                    value.descriptor.data_type == DataType::Float32
+                        || (graph_info.exact_float16
+                            && value.descriptor.data_type == DataType::Float16)
+                })
+            {
+                // WebNN sign(NaN) is zero; some native CPU sign kernels return NaN.
+                // Widening also makes small half values visible to comparisons.
+                use crate::protos::coreml::mil_spec::DataType as MilType;
+                let output_id =
+                    op.output_operand()
+                        .ok_or_else(|| GraphError::ConversionFailed {
+                            format: "coreml_mlprogram".into(),
+                            reason: "sign has no output".into(),
+                        })?;
+                let (output_name, output_type) =
+                    Self::create_output_value(graph_info, output_id, &operand_name_overrides)?;
+                let mut reserved: std::collections::HashSet<String> = graph_info
+                    .operands
+                    .iter()
+                    .enumerate()
+                    .map(|(id, _)| operand_name(graph_info, id as u32))
+                    .chain(
+                        main_block
+                            .operations
+                            .iter()
+                            .flat_map(|op| op.outputs.iter().map(|v| v.name.clone())),
+                    )
+                    .collect();
+                let mut fresh = |suffix: &str| {
+                    let base = format!("{output_name}_sign_{suffix}");
+                    let mut name = base.clone();
+                    let mut n = 0;
+                    while !reserved.insert(name.clone()) {
+                        n += 1;
+                        name = format!("{base}_{n}");
+                    }
+                    name
+                };
+                let wide = fresh("wide");
+                main_block.operations.push(Self::create_cast_operation(
+                    Self::output_name_for_operand(graph_info, *input, &operand_name_overrides),
+                    Self::create_value_with_mil_type(
+                        graph_info,
+                        *input,
+                        wide.clone(),
+                        MilType::Float32 as i32,
+                    )?,
+                    "fp32",
+                ));
+                let mut emit = |kind: &str,
+                                suffix: &str,
+                                dtype: i32,
+                                bindings: Vec<(&str, Argument)>|
+                 -> Result<String, GraphError> {
+                    let name = fresh(suffix);
+                    main_block.operations.push(Self::create_mil_operation(
+                        kind,
+                        bindings.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+                        vec![Self::create_value_with_mil_type(
+                            graph_info,
+                            output_id,
+                            name.clone(),
+                            dtype,
+                        )?],
+                    ));
+                    Ok(name)
+                };
+                let named = |s: &str| Self::create_name_argument(s.into());
+                let negative = emit(
+                    "less",
+                    "negative",
+                    MilType::Bool as i32,
+                    vec![
+                        ("x", named(&wide)),
+                        ("y", Self::create_immediate_float(0.0)),
+                    ],
+                )?;
+                let positive = emit(
+                    "greater",
+                    "positive",
+                    MilType::Bool as i32,
+                    vec![
+                        ("x", named(&wide)),
+                        ("y", Self::create_immediate_float(0.0)),
+                    ],
+                )?;
+                let lower = emit(
+                    "select",
+                    "lower",
+                    MilType::Float32 as i32,
+                    vec![
+                        ("cond", named(&negative)),
+                        ("a", Self::create_immediate_float(-1.0)),
+                        ("b", Self::create_immediate_float(0.0)),
+                    ],
+                )?;
+                let result = emit(
+                    "select",
+                    "result",
+                    MilType::Float32 as i32,
+                    vec![
+                        ("cond", named(&positive)),
+                        ("a", Self::create_immediate_float(1.0)),
+                        ("b", named(&lower)),
+                    ],
+                )?;
+                main_block.operations.push(Self::create_cast_operation(
+                    result,
+                    output_type,
+                    if graph_info
+                        .operand(output_id)
+                        .is_some_and(|v| v.descriptor.data_type == DataType::Float16)
+                    {
+                        "fp16"
+                    } else {
+                        "fp32"
+                    },
+                ));
+                if let Some((pending, name)) = deferred_transposes.remove(&output_id) {
+                    main_block.operations.extend(pending);
+                    operand_name_overrides.insert(output_id, name);
+                }
+                continue;
+            }
+
+            // Exact float16 only. The half kernels below exceed WebNN's error
+            // bounds on older accelerator paths, including flushing represented
+            // subnormals. Compute is float32: the activation is evaluated in
+            // float32 and rounded once at its float16 result. Storage stays
+            // float16 and the compute units requested are unchanged.
+            let wide_activation_input = match op {
+                Operation::Gelu { input, .. }
+                | Operation::Sigmoid { input, .. }
+                | Operation::Tanh { input, .. }
+                | Operation::Relu { input, .. }
+                | Operation::LeakyRelu { input, .. }
+                | Operation::Elu { input, .. }
+                | Operation::Exp { input, .. }
+                | Operation::Neg { input, .. }
+                | Operation::Reciprocal { input, .. }
+                | Operation::HardSigmoid { input, .. }
+                | Operation::HardSwish { input, .. } => Some(*input),
+                _ => None,
+            };
+            if let Some(input) = wide_activation_input
+                && graph_info.exact_float16
+                && graph_info
+                    .operand(input)
+                    .is_some_and(|operand| operand.descriptor.data_type == DataType::Float16)
+            {
+                let output_id =
+                    op.output_operand()
+                        .ok_or_else(|| GraphError::ConversionFailed {
+                            format: "coreml_mlprogram".into(),
+                            reason: format!("{} operation has no output operand", op.op_type()),
+                        })?;
+                let (output_name, output_type) =
+                    Self::create_output_value(graph_info, output_id, &operand_name_overrides)?;
+                let mut reserved_names: std::collections::HashSet<String> = graph_info
+                    .operands
+                    .iter()
+                    .enumerate()
+                    .map(|(id, _)| operand_name(graph_info, id as u32))
+                    .chain(operand_name_overrides.values().cloned())
+                    .chain(main_block.operations.iter().flat_map(|operation| {
+                        operation.outputs.iter().map(|output| output.name.clone())
+                    }))
+                    .collect();
+                let mut fresh_name = |base: String| {
+                    let mut candidate = base.clone();
+                    let mut suffix = 0usize;
+                    while !reserved_names.insert(candidate.clone()) {
+                        suffix += 1;
+                        candidate = format!("{base}_{suffix}");
+                    }
+                    candidate
+                };
+                let wide_input_name = fresh_name(format!(
+                    "{output_name}_{op_type_lower}_input_fp32_{output_id}"
+                ));
+                let wide_result_name = fresh_name(format!(
+                    "{output_name}_{op_type_lower}_result_fp32_{output_id}"
+                ));
+                let wide_input_type = Self::create_value_with_mil_type(
+                    graph_info,
+                    input,
+                    wide_input_name.clone(),
+                    crate::protos::coreml::mil_spec::DataType::Float32 as i32,
+                )?;
+                main_block.operations.push(Self::create_cast_operation(
+                    Self::output_name_for_operand(graph_info, input, &operand_name_overrides),
+                    wide_input_type,
+                    "fp32",
+                ));
+                let wide_result_type = Self::create_value_with_mil_type(
+                    graph_info,
+                    output_id,
+                    wide_result_name.clone(),
+                    crate::protos::coreml::mil_spec::DataType::Float32 as i32,
+                )?;
+                if matches!(op, Operation::Tanh { .. }) {
+                    Self::append_nan_preserving_tanh(
+                        graph_info,
+                        &mut main_block,
+                        wide_input_name,
+                        wide_result_type,
+                    );
+                } else if matches!(op, Operation::Neg { .. }) {
+                    let inputs = HashMap::from([
+                        ("x".into(), Self::create_name_argument(wide_input_name)),
+                        ("y".into(), Self::create_immediate_float(-1.0)),
+                    ]);
+                    main_block.operations.push(Self::create_mil_operation(
+                        mil_ops::DIV,
+                        inputs,
+                        vec![wide_result_type],
+                    ));
+                } else if matches!(op, Operation::HardSwish { .. }) {
+                    // Do not round the sigmoid helper to fp16: hardSwish has
+                    // one WebNN result, not two separately rounded operations.
+                    let sigmoid_name =
+                        fresh_name(format!("{output_name}_hardswish_sigmoid_fp32_{output_id}"));
+                    let sigmoid_type = Self::create_value_with_mil_type(
+                        graph_info,
+                        input,
+                        sigmoid_name.clone(),
+                        crate::protos::coreml::mil_spec::DataType::Float32 as i32,
+                    )?;
+                    let mut sigmoid_inputs = HashMap::new();
+                    sigmoid_inputs.insert(
+                        "x".into(),
+                        Self::create_name_argument(wide_input_name.clone()),
+                    );
+                    sigmoid_inputs.insert("alpha".into(), Self::create_immediate_float(1.0 / 6.0));
+                    sigmoid_inputs.insert("beta".into(), Self::create_immediate_float(0.5));
+                    main_block.operations.push(Self::create_mil_operation(
+                        mil_ops::HARD_SIGMOID,
+                        sigmoid_inputs,
+                        vec![sigmoid_type],
+                    ));
+                    let mut mul_inputs = HashMap::new();
+                    mul_inputs.insert("x".into(), Self::create_name_argument(wide_input_name));
+                    mul_inputs.insert("y".into(), Self::create_name_argument(sigmoid_name));
+                    main_block.operations.push(Self::create_mil_operation(
+                        mil_ops::MUL,
+                        mul_inputs,
+                        vec![wide_result_type],
+                    ));
+                } else {
+                    let mut inputs =
+                        self.create_operation_inputs(graph_info, op, &[wide_input_name])?;
+                    // WebNN casts these parameters to the input type at graph
+                    // construction. Widen the rounded value, not the original.
+                    let rounded = |value: f32| {
+                        Self::create_immediate_float(half::f16::from_f32(value).to_f32())
+                    };
+                    match op {
+                        Operation::LeakyRelu { options, .. } => {
+                            inputs.insert(
+                                "alpha".into(),
+                                rounded(options.as_ref().map_or(0.01, |o| o.alpha as f32)),
+                            );
+                        }
+                        Operation::Elu { options, .. } => {
+                            inputs.insert(
+                                "alpha".into(),
+                                rounded(options.as_ref().map_or(1.0, |o| o.alpha as f32)),
+                            );
+                        }
+                        Operation::HardSigmoid { options, .. } => {
+                            inputs.insert(
+                                "alpha".into(),
+                                rounded(options.as_ref().map_or(0.2, |o| o.alpha as f32)),
+                            );
+                            inputs.insert(
+                                "beta".into(),
+                                rounded(options.as_ref().map_or(0.5, |o| o.beta as f32)),
+                            );
+                        }
+                        _ => {}
+                    }
+                    main_block.operations.push(Self::create_mil_operation(
+                        self.get_mil_op_type(op.op_type())?,
+                        inputs,
+                        vec![wide_result_type],
+                    ));
+                }
+                main_block.operations.push(Self::create_cast_operation(
+                    wide_result_name,
+                    output_type,
+                    "fp16",
+                ));
+                if let Some((pending_ops, transposed_name)) = deferred_transposes.remove(&output_id)
+                {
+                    main_block.operations.extend(pending_ops);
+                    operand_name_overrides.insert(output_id, transposed_name);
+                }
+                continue;
+            }
 
             if matches!(
                 op,
@@ -7802,6 +7675,45 @@ impl super::GraphConverter for CoremlMlProgramConverter {
 
                 let mut input_names =
                     Self::input_names_for_operation(graph_info, op, &operand_name_overrides);
+
+                // Inspect represented Half NaN/infinity values in FP32, using
+                // the source operand's shape rather than the uint8 result.
+                if matches!(op_type_lower.as_str(), "isnan" | "isinfinite")
+                    && graph_info.exact_float16
+                    && let Some(&input_id) = op.input_operands().first()
+                    && graph_info
+                        .operand(input_id)
+                        .is_some_and(|operand| operand.descriptor.data_type == DataType::Float16)
+                {
+                    let reserved: std::collections::HashSet<String> = graph_info
+                        .operands
+                        .iter()
+                        .enumerate()
+                        .map(|(id, _)| operand_name(graph_info, id as u32))
+                        .chain(main_block.operations.iter().flat_map(|operation| {
+                            operation.outputs.iter().map(|output| output.name.clone())
+                        }))
+                        .collect();
+                    let base = format!("{}_class_fp32_{output_id}", input_names[0]);
+                    let mut wide_name = base.clone();
+                    let mut suffix = 0usize;
+                    while reserved.contains(&wide_name) {
+                        suffix += 1;
+                        wide_name = format!("{base}_{suffix}");
+                    }
+                    let wide_type = Self::create_value_with_mil_type(
+                        graph_info,
+                        input_id,
+                        wide_name.clone(),
+                        MilDataType::Float32 as i32,
+                    )?;
+                    main_block.operations.push(Self::create_cast_operation(
+                        input_names[0].clone(),
+                        wide_type,
+                        "fp32",
+                    ));
+                    input_names[0] = wide_name;
+                }
 
                 // WebNN allows every operand data type for comparisons, but only requires
                 // float32, float16, and int32 support. CoreML's comparison operations reject
@@ -7955,10 +7867,16 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                         .map(|o| &o.descriptor.data_type)
                         .cloned()
                         .unwrap_or(DataType::Float32);
-                    let abs_mil_dtype = Self::mil_data_type(&input_dtype)?;
+                    // Exact float16 inspects the value classes in float32 (see above).
+                    let wide = graph_info.exact_float16 && input_dtype == DataType::Float16;
+                    let abs_mil_dtype = if wide {
+                        MilDataType::Float32 as i32
+                    } else {
+                        Self::mil_data_type(&input_dtype)?
+                    };
                     let abs_type = Self::create_value_with_mil_type(
                         graph_info,
-                        output_id,
+                        op.input_operands()[0],
                         abs_name.clone(),
                         abs_mil_dtype,
                     )?;
@@ -7975,7 +7893,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     } else {
                         f32::MAX
                     };
-                    let max_val_arg = if input_dtype == DataType::Float16 {
+                    let max_val_arg = if input_dtype == DataType::Float16 && !wide {
                         Self::create_immediate_float16(max_val)
                     } else {
                         Self::create_immediate_float(max_val)
@@ -8090,43 +8008,6 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     vec![output_type],
                 ));
 
-                continue;
-            }
-
-            if Self::emit_int32_triangular(
-                graph_info,
-                op,
-                &operand_name_overrides,
-                &mut main_block,
-            )? {
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending, transposed)) = deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending);
-                    operand_name_overrides.insert(output_id, transposed);
-                }
-                continue;
-            }
-
-            if Self::emit_dilated_pool(graph_info, op, &operand_name_overrides, &mut main_block)?
-                || Self::emit_edge_pad(graph_info, op, &operand_name_overrides, &mut main_block)?
-            {
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending, transposed)) = deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending);
-                    operand_name_overrides.insert(output_id, transposed);
-                }
-                continue;
-            }
-
-            if Self::emit_exact_int32(graph_info, op, &operand_name_overrides, &mut main_block)? {
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending, transposed)) = deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending);
-                    operand_name_overrides.insert(output_id, transposed);
-                }
                 continue;
             }
 
@@ -9223,7 +9104,16 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     r#type: Some(output_value_type),
                 };
 
-                let mul_op = Self::create_mil_operation("mul", mul_inputs, vec![mul_output_type]);
+                // The floating multiply-by-minus-one kernel canonicalizes +0
+                // on some large-vector plans. Division by exact -1 retains
+                // both zero signs, infinities, and NaN classification.
+                let operation = if input_operand.descriptor.data_type == DataType::Float32 {
+                    mil_ops::DIV
+                } else {
+                    mil_ops::MUL
+                };
+                let mul_op =
+                    Self::create_mil_operation(operation, mul_inputs, vec![mul_output_type]);
 
                 main_block.operations.push(mul_op);
 
@@ -9487,19 +9377,336 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                 }
             }
 
+            // Normalization with runtime scale/bias, and layer normalization
+            // whose constant affine parameters native layer_norm cannot apply:
+            // CoreML's native layer_norm/instance_norm require const
+            // gamma/beta ("Param 'gamma' must be const"), so run the native op
+            // without them and apply `y = norm(x) * scale + bias` with explicit
+            // mul/add, reshaping scale/bias to a broadcast-compatible shape.
+            // Native layer_norm plans can omit or reorder constant gamma/beta on
+            // nontrailing or permuted axes, so those keep their affine work
+            // explicit; trailing ascending axes keep the fused native op.
+            // Exact float16 also applies the affine work explicitly in float32.
+            // Both params are stripped together: the native op computes
+            // `norm * gamma + beta`, so applying one after the fact while the
+            // other stays inside would change the result.
             if matches!(
                 op,
                 Operation::LayerNormalization { .. } | Operation::InstanceNormalization { .. }
             ) {
-                Self::emit_normalization(graph_info, op, &operand_name_overrides, &mut main_block)?;
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending_ops, transposed_name)) =
-                        deferred_transposes.remove(&output_id)
+                let (scale_id, bias_id) = match op {
+                    Operation::LayerNormalization { options, .. } => (
+                        options.as_ref().and_then(|o| o.scale),
+                        options.as_ref().and_then(|o| o.bias),
+                    ),
+                    Operation::InstanceNormalization { options, .. } => (
+                        options.as_ref().and_then(|o| o.scale),
+                        options.as_ref().and_then(|o| o.bias),
+                    ),
+                    _ => (None, None),
+                };
+                let is_runtime = |id: Option<u32>| {
+                    id.and_then(|id| graph_info.operand(id))
+                        .map(|o| o.kind != crate::graph::OperandKind::Constant)
+                        .unwrap_or(false)
+                };
+                let layer_norm = matches!(op, Operation::LayerNormalization { .. });
+                let half_layer_norm = layer_norm
+                    && graph_info.exact_float16
+                    && op
+                        .input_operands()
+                        .first()
+                        .and_then(|&id| graph_info.operand(id))
+                        .is_some_and(|operand| operand.descriptor.data_type == DataType::Float16);
+                if is_runtime(scale_id)
+                    || is_runtime(bias_id)
+                    || (layer_norm
+                        && (scale_id.is_some() || bias_id.is_some())
+                        && (half_layer_norm || !layer_norm_has_trailing_axes(graph_info, op)))
                 {
-                    main_block.operations.extend(pending_ops);
-                    operand_name_overrides.insert(output_id, transposed_name);
+                    let x_id = *op.input_operands().first().ok_or_else(|| {
+                        GraphError::ConversionFailed {
+                            format: "coreml_mlprogram".to_string(),
+                            reason: format!("{} has no input operand", op.op_type()),
+                        }
+                    })?;
+                    let x_op =
+                        graph_info
+                            .operand(x_id)
+                            .ok_or_else(|| GraphError::ConversionFailed {
+                                format: "coreml_mlprogram".to_string(),
+                                reason: format!("input operand {x_id} not found"),
+                            })?;
+                    let x_shape = x_op.descriptor.static_or_max_shape();
+                    let rank = x_shape.len();
+                    let mil_dtype = if half_layer_norm {
+                        crate::protos::coreml::mil_spec::DataType::Float32 as i32
+                    } else {
+                        Self::graph_value_mil_type(&x_op.descriptor.data_type)?
+                    };
+                    let out_id =
+                        op.output_operand()
+                            .ok_or_else(|| GraphError::ConversionFailed {
+                                format: "coreml_mlprogram".to_string(),
+                                reason: format!("{} has no output operand", op.op_type()),
+                            })?;
+                    let (out_name, out_type) =
+                        Self::create_output_value(graph_info, out_id, &operand_name_overrides)?;
+
+                    // Broadcast target: scale/bias expanded to the input rank with
+                    // 1s on non-normalized (layer) / non-channel (instance) dims.
+                    let normalized_axes: Vec<usize> = match op {
+                        Operation::LayerNormalization { options, .. } => options
+                            .as_ref()
+                            .and_then(|o| o.axes.as_ref())
+                            .map(|ax| ax.iter().map(|&a| a as usize).collect())
+                            .unwrap_or_else(|| {
+                                if rank > 1 {
+                                    (1..rank).collect()
+                                } else {
+                                    vec![0]
+                                }
+                            }),
+                        _ => {
+                            let nhwc = match op {
+                                Operation::InstanceNormalization { options, .. } => options
+                                    .as_ref()
+                                    .map(|o| o.layout.eq_ignore_ascii_case("nhwc"))
+                                    .unwrap_or(false),
+                                _ => false,
+                            };
+                            let c_idx = if nhwc { rank.saturating_sub(1) } else { 1 };
+                            vec![c_idx]
+                        }
+                    };
+                    let target: Vec<u32> = (0..rank)
+                        .map(|i| {
+                            if normalized_axes.contains(&i) {
+                                x_shape[i]
+                            } else {
+                                1
+                            }
+                        })
+                        .collect();
+                    let mut sorted_axes = normalized_axes.clone();
+                    sorted_axes.sort_unstable();
+                    let parameter_permutation: Vec<u32> = sorted_axes
+                        .iter()
+                        .map(|axis| normalized_axes.iter().position(|a| a == axis).unwrap() as u32)
+                        .collect();
+                    let mut reserved: std::collections::HashSet<String> = graph_info
+                        .operands
+                        .iter()
+                        .enumerate()
+                        .map(|(id, _)| operand_name(graph_info, id as u32))
+                        .chain(main_block.operations.iter().flat_map(|operation| {
+                            operation.outputs.iter().map(|output| output.name.clone())
+                        }))
+                        .collect();
+                    let mut fresh = |suffix: &str| {
+                        let base = format!("{out_name}_{suffix}_{out_id}");
+                        let mut name = base.clone();
+                        let mut index = 0usize;
+                        while !reserved.insert(name.clone()) {
+                            index += 1;
+                            name = format!("{base}_{index}");
+                        }
+                        name
+                    };
+
+                    let mut stripped = op.clone();
+                    match &mut stripped {
+                        Operation::LayerNormalization {
+                            options: Some(o), ..
+                        } => {
+                            o.scale = None;
+                            o.bias = None;
+                        }
+                        Operation::InstanceNormalization {
+                            options: Some(o), ..
+                        } => {
+                            o.scale = None;
+                            o.bias = None;
+                        }
+                        _ => {}
+                    }
+                    let norm_name = fresh("nogb");
+                    let mut norm_overrides = operand_name_overrides.clone();
+                    norm_overrides.insert(out_id, norm_name.clone());
+                    // Native instance_norm normalizes NCHW only: an NHWC normalization goes
+                    // through the same transposes as the fused lowering, then takes the
+                    // explicit affine steps below in NHWC.
+                    let nhwc_instance_norm = matches!(
+                        &stripped,
+                        Operation::InstanceNormalization { options: Some(o), .. }
+                            if o.layout.eq_ignore_ascii_case("nhwc")
+                    );
+                    if nhwc_instance_norm {
+                        self.push_nhwc_instance_norm(
+                            graph_info,
+                            &stripped,
+                            &norm_overrides,
+                            &mut main_block,
+                        )?;
+                    } else {
+                        let mut mil = self.convert_operation_with_overrides(
+                            graph_info,
+                            &stripped,
+                            &norm_overrides,
+                        )?;
+                        if half_layer_norm {
+                            let wide_name = fresh("normalization_fp32_input");
+                            main_block.operations.push(Self::create_cast_operation(
+                                Self::output_name_for_operand(
+                                    graph_info,
+                                    x_id,
+                                    &operand_name_overrides,
+                                ),
+                                Self::create_value_with_mil_type(
+                                    graph_info,
+                                    x_id,
+                                    wide_name.clone(),
+                                    mil_dtype,
+                                )?,
+                                "fp32",
+                            ));
+                            mil.inputs
+                                .insert("x".into(), Self::create_name_argument(wide_name));
+                            let epsilon = match op {
+                                Operation::LayerNormalization { options, .. } => {
+                                    options.as_ref().map_or(1e-5, |o| o.epsilon as f32)
+                                }
+                                _ => unreachable!(),
+                            };
+                            mil.inputs.insert(
+                                "epsilon".into(),
+                                Self::create_immediate_float(half::f16::from_f32(epsilon).to_f32()),
+                            );
+                            mil.outputs = vec![Self::create_value_with_mil_type(
+                                graph_info,
+                                out_id,
+                                norm_name.clone(),
+                                mil_dtype,
+                            )?];
+                        }
+                        main_block.operations.push(mil);
+                    }
+
+                    let mut cur = norm_name;
+                    if half_layer_norm && scale_id.is_none() && bias_id.is_some() {
+                        // A fused normalization-plus-bias plan can apply the
+                        // broadcast bias only to its first batch. Explicit unit
+                        // scale retains the complete affine composition.
+                        let scaled_name = fresh("unit_gamma");
+                        let mut inputs = HashMap::new();
+                        inputs.insert("x".into(), Self::create_name_argument(cur));
+                        inputs.insert("y".into(), Self::create_immediate_float(1.0));
+                        main_block.operations.push(Self::create_mil_operation(
+                            "mul",
+                            inputs,
+                            vec![Self::create_value_with_mil_type(
+                                graph_info,
+                                out_id,
+                                scaled_name.clone(),
+                                mil_dtype,
+                            )?],
+                        ));
+                        cur = scaled_name;
+                    }
+                    let steps: Vec<(&str, u32, &str)> = scale_id
+                        .map(|id| ("mul", id, "gamma"))
+                        .into_iter()
+                        .chain(bias_id.map(|id| ("add", id, "beta")))
+                        .collect();
+                    let last = steps.len().saturating_sub(1);
+                    for (i, (mil_op, param_id, tag)) in steps.into_iter().enumerate() {
+                        let mut param_name = Self::output_name_for_operand(
+                            graph_info,
+                            param_id,
+                            &operand_name_overrides,
+                        );
+                        if half_layer_norm {
+                            let wide_name = fresh(&format!("{tag}_fp32"));
+                            main_block.operations.push(Self::create_cast_operation(
+                                param_name,
+                                Self::create_value_with_mil_type(
+                                    graph_info,
+                                    param_id,
+                                    wide_name.clone(),
+                                    mil_dtype,
+                                )?,
+                                "fp32",
+                            ));
+                            param_name = wide_name;
+                        }
+                        if parameter_permutation
+                            .iter()
+                            .enumerate()
+                            .any(|(i, &axis)| axis != i as u32)
+                        {
+                            let transposed_name = fresh(&format!("{tag}_axes"));
+                            let mut inputs = HashMap::new();
+                            inputs.insert("x".into(), Self::create_name_argument(param_name));
+                            inputs.insert(
+                                "perm".into(),
+                                Self::create_immediate_int_array(&parameter_permutation),
+                            );
+                            let shape: Vec<_> =
+                                sorted_axes.iter().map(|&axis| x_shape[axis]).collect();
+                            main_block.operations.push(Self::create_mil_operation(
+                                "transpose",
+                                inputs,
+                                vec![Self::value_type_for_static_shape(
+                                    transposed_name.clone(),
+                                    mil_dtype,
+                                    &shape,
+                                )],
+                            ));
+                            param_name = transposed_name;
+                        }
+                        let bcast = Self::rnn_reshape(
+                            &mut main_block,
+                            &param_name,
+                            &target,
+                            fresh(&format!("{tag}_bcast")),
+                            mil_dtype,
+                        );
+                        let (step_name, step_type) = if i == last && !half_layer_norm {
+                            (out_name.clone(), out_type.clone())
+                        } else {
+                            let name = fresh(&format!("{tag}_applied"));
+                            let ty = Self::create_value_with_mil_type(
+                                graph_info,
+                                out_id,
+                                name.clone(),
+                                mil_dtype,
+                            )?;
+                            (name, ty)
+                        };
+                        let mut io = HashMap::new();
+                        io.insert("x".to_string(), Self::create_name_argument(cur.clone()));
+                        io.insert("y".to_string(), Self::create_name_argument(bcast));
+                        main_block.operations.push(Self::create_mil_operation(
+                            mil_op,
+                            io,
+                            vec![step_type],
+                        ));
+                        cur = step_name;
+                    }
+                    if half_layer_norm {
+                        main_block
+                            .operations
+                            .push(Self::create_cast_operation(cur, out_type, "fp16"));
+                    }
+                    // A consumer (an NHWC conv2d, for example) may wait on this output.
+                    if let Some((pending_ops, transposed_name)) =
+                        deferred_transposes.remove(&out_id)
+                    {
+                        main_block.operations.extend(pending_ops);
+                        operand_name_overrides.insert(out_id, transposed_name);
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // Integer division: MIL `real_div` on integer operands has no
@@ -9542,7 +9749,8 @@ impl super::GraphConverter for CoremlMlProgramConverter {
             // identity over a constant: CoreML's compiler elides `identity`
             // ops, and for a const input the plan builder then fails with
             // "Variable is not associated with a name" (error -5) because the
-            // alias name was dropped. Emit an exact `mul(x, 1)` instead, which
+            // alias name was dropped. Emit an exact floating `real_div(x, 1)`
+            // (integer `mul(x, 1)`) instead, which
             // survives compilation. A same-type constant Cast needs the same
             // treatment: the FP32 cast post-pass would otherwise emit identity.
             // Different-type casts must retain their conversion and rounding.
@@ -9563,6 +9771,61 @@ impl super::GraphConverter for CoremlMlProgramConverter {
             {
                 let (_, out_type) =
                     Self::create_output_value(graph_info, out_id, &operand_name_overrides)?;
+                if graph_info.exact_float16 && id_in_op.descriptor.data_type == DataType::Float16 {
+                    let mut reserved: std::collections::HashSet<String> = graph_info
+                        .operands
+                        .iter()
+                        .enumerate()
+                        .map(|(id, _)| operand_name(graph_info, id as u32))
+                        .chain(main_block.operations.iter().flat_map(|operation| {
+                            operation.outputs.iter().map(|output| output.name.clone())
+                        }))
+                        .collect();
+                    let mut fresh = |base: String| {
+                        let mut candidate = base.clone();
+                        let mut suffix = 0usize;
+                        while !reserved.insert(candidate.clone()) {
+                            suffix += 1;
+                            candidate = format!("{base}_{suffix}");
+                        }
+                        candidate
+                    };
+                    let input_name =
+                        Self::output_name_for_operand(graph_info, id_in, &operand_name_overrides);
+                    let wide_input =
+                        fresh(format!("{}_identity_input_fp32_{out_id}", out_type.name));
+                    let wide_output =
+                        fresh(format!("{}_identity_result_fp32_{out_id}", out_type.name));
+                    let input_type = Self::create_value_with_mil_type(
+                        graph_info,
+                        id_in,
+                        wide_input.clone(),
+                        crate::protos::coreml::mil_spec::DataType::Float32 as i32,
+                    )?;
+                    main_block
+                        .operations
+                        .push(Self::create_cast_operation(input_name, input_type, "fp32"));
+                    let mut inputs = HashMap::new();
+                    inputs.insert("x".into(), Self::create_name_argument(wide_input));
+                    inputs.insert("y".into(), Self::create_immediate_float(1.0));
+                    let output_type = Self::create_value_with_mil_type(
+                        graph_info,
+                        out_id,
+                        wide_output.clone(),
+                        crate::protos::coreml::mil_spec::DataType::Float32 as i32,
+                    )?;
+                    main_block.operations.push(Self::create_mil_operation(
+                        mil_ops::DIV,
+                        inputs,
+                        vec![output_type],
+                    ));
+                    main_block.operations.push(Self::create_cast_operation(
+                        wide_output,
+                        out_type,
+                        "fp16",
+                    ));
+                    continue;
+                }
                 let one = match id_in_op.descriptor.data_type {
                     DataType::Float16 => Self::create_immediate_float16(1.0),
                     DataType::Int32 => Self::create_immediate_int(1),
@@ -9579,28 +9842,14 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                 );
                 mul_in.insert("y".to_string(), one);
                 main_block.operations.push(Self::create_mil_operation(
-                    mil_ops::MUL,
+                    if id_in_op.descriptor.data_type == DataType::Float32 {
+                        mil_ops::DIV
+                    } else {
+                        mil_ops::MUL
+                    },
                     mul_in,
                     vec![out_type],
                 ));
-                continue;
-            }
-
-            if matches!(op, Operation::Tile { .. })
-                && !graph_info
-                    .operand(op.input_operands()[0])
-                    .unwrap()
-                    .descriptor
-                    .shape
-                    .is_empty()
-            {
-                Self::emit_tile_concat(graph_info, op, &operand_name_overrides, &mut main_block)?;
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending, transposed)) = deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending);
-                    operand_name_overrides.insert(output_id, transposed);
-                }
                 continue;
             }
 
@@ -9843,26 +10092,6 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                 overrides.insert(cond_id, bool_cond_name);
                 let mil_op = self.convert_operation_with_overrides(graph_info, op, &overrides)?;
                 main_block.operations.push(mil_op);
-                continue;
-            }
-
-            if let Operation::Resample2d { options, .. } = op
-                && options
-                    .as_ref()
-                    .is_none_or(|o| !o.mode.eq_ignore_ascii_case("linear"))
-            {
-                Self::emit_nearest_resample(
-                    graph_info,
-                    op,
-                    &operand_name_overrides,
-                    &mut main_block,
-                )?;
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending, transposed)) = deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending);
-                    operand_name_overrides.insert(output_id, transposed);
-                }
                 continue;
             }
 
@@ -10123,7 +10352,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     graph_info,
                     op,
                     &operand_name_overrides,
-                    &weight_builder,
+                    weight_builder,
                     &mut main_block,
                 )?;
                 // A dequantized conv filter carries a deferred layout transpose
@@ -10204,49 +10433,6 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     &operand_name_overrides,
                     &mut main_block,
                 )?;
-                continue;
-            }
-
-            if let Operation::RoundEven { input, .. } = op {
-                let operand = graph_info.operand(*input).unwrap();
-                let name =
-                    Self::output_name_for_operand(graph_info, *input, &operand_name_overrides);
-                let (_, output) = Self::create_output_value(
-                    graph_info,
-                    op.output_operand().unwrap(),
-                    &operand_name_overrides,
-                )?;
-                Self::emit_round_even(
-                    &mut main_block,
-                    &name,
-                    output,
-                    &operand.descriptor.shape,
-                    Self::mil_data_type(&operand.descriptor.data_type)?,
-                );
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending_ops, transposed_name)) =
-                        deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending_ops);
-                    operand_name_overrides.insert(output_id, transposed_name);
-                }
-                continue;
-            }
-
-            if op_type_lower == "reducelogsum" {
-                Self::emit_reduce_log_sum(
-                    graph_info,
-                    op,
-                    &operand_name_overrides,
-                    &mut main_block,
-                )?;
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending_ops, transposed_name)) =
-                        deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending_ops);
-                    operand_name_overrides.insert(output_id, transposed_name);
-                }
                 continue;
             }
 
@@ -10669,74 +10855,6 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     }
                     continue;
                 }
-            }
-
-            if matches!(
-                op,
-                Operation::ScatterElements { .. } | Operation::ScatterND { .. }
-            ) {
-                let ids = op.input_operands();
-                let data_id = ids[0];
-                let index_id = ids[1];
-                let data = graph_info.operand(data_id).unwrap();
-                let indices = graph_info.operand(index_id).unwrap();
-                let (output_name, _) = Self::create_output_value(
-                    graph_info,
-                    op.output_operand().unwrap(),
-                    &operand_name_overrides,
-                )?;
-                let data_name =
-                    Self::output_name_for_operand(graph_info, data_id, &operand_name_overrides);
-                let index_name =
-                    Self::output_name_for_operand(graph_info, index_id, &operand_name_overrides);
-                let index_name = Self::cast_with_graph_shape(
-                    &mut main_block,
-                    &index_name,
-                    format!("{output_name}_scatter_i32"),
-                    crate::protos::coreml::mil_spec::DataType::Int32 as i32,
-                    &indices.descriptor.shape,
-                );
-                let axes = match op {
-                    Operation::ScatterElements { options, .. } => {
-                        let axis = options.as_ref().map_or(0, |o| o.axis) as usize;
-                        axis..axis + 1
-                    }
-                    _ => {
-                        0..indices
-                            .descriptor
-                            .static_or_max_shape()
-                            .last()
-                            .copied()
-                            .unwrap() as usize
-                    }
-                };
-                let bounds = Self::emit_gather_bounds(
-                    &mut main_block,
-                    &data_name,
-                    &data.descriptor,
-                    axes,
-                    &output_name,
-                )?;
-                let normalized = Self::emit_gather_index_norm(
-                    &mut main_block,
-                    &index_name,
-                    &indices.descriptor.shape,
-                    &bounds,
-                    &output_name,
-                );
-                let mut overrides = operand_name_overrides.clone();
-                overrides.insert(index_id, normalized);
-                main_block
-                    .operations
-                    .push(self.convert_operation_with_overrides(graph_info, op, &overrides)?);
-                if let Some(output_id) = op.output_operand()
-                    && let Some((pending_ops, transposed_name)) =
-                        deferred_transposes.remove(&output_id)
-                {
-                    main_block.operations.extend(pending_ops);
-                    operand_name_overrides.insert(output_id, transposed_name);
-                }
-                continue;
             }
 
             // Gather: cast uint32/int64 indices to int32 (CoreML gather only accepts int32 and smaller).
@@ -11363,120 +11481,12 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     _ => "",
                 };
                 if inst_layout.eq_ignore_ascii_case("nhwc") {
-                    let input_id = op.input_operands().first().copied().ok_or_else(|| {
-                        GraphError::ConversionFailed {
-                            format: "coreml_mlprogram".to_string(),
-                            reason: "instanceNorm op has no input operand".to_string(),
-                        }
-                    })?;
-                    let output_id =
-                        op.output_operand()
-                            .ok_or_else(|| GraphError::ConversionFailed {
-                                format: "coreml_mlprogram".to_string(),
-                                reason: "instanceNorm op has no output operand".to_string(),
-                            })?;
-                    let input_operand = graph_info.operand(input_id).ok_or_else(|| {
-                        GraphError::ConversionFailed {
-                            format: "coreml_mlprogram".to_string(),
-                            reason: format!("instanceNorm input operand {} not found", input_id),
-                        }
-                    })?;
-                    let output_operand = graph_info.operand(output_id).ok_or_else(|| {
-                        GraphError::ConversionFailed {
-                            format: "coreml_mlprogram".to_string(),
-                            reason: format!("instanceNorm output operand {} not found", output_id),
-                        }
-                    })?;
-
-                    let input_name = Self::output_name_for_operand(
-                        graph_info,
-                        input_id,
-                        &operand_name_overrides,
-                    );
-                    let (output_name, output_type) =
-                        Self::create_output_value(graph_info, output_id, &operand_name_overrides)?;
-                    let dtype = Self::mil_data_type(&input_operand.descriptor.data_type)?;
-
-                    // Pre-transpose: NHWC [N,H,W,C] -> NCHW [N,C,H,W], perm=[0,3,1,2]
-                    let nchw_in_name = format!("{}_in_nchw", output_name);
-                    let nchw_perm = [0u32, 3, 1, 2];
-                    let nchw_in_shape =
-                        Self::permute_graph_shape(&input_operand.descriptor.shape, &nchw_perm);
-                    let nchw_in_dims = Self::mil_dimensions_from_graph_shape(&nchw_in_shape, false);
-                    let nchw_in_type = NamedValueType {
-                        name: nchw_in_name.clone(),
-                        r#type: Some(ValueType {
-                            r#type: Some(
-                                crate::protos::coreml::mil_spec::value_type::Type::TensorType(
-                                    TensorType {
-                                        rank: nchw_in_dims.len() as i64,
-                                        data_type: dtype,
-                                        dimensions: nchw_in_dims,
-                                        attributes: HashMap::new(),
-                                    },
-                                ),
-                            ),
-                        }),
-                    };
-                    let mut pre_tp: HashMap<String, Argument> = HashMap::new();
-                    pre_tp.insert("x".to_string(), Self::create_name_argument(input_name));
-                    pre_tp.insert(
-                        "perm".to_string(),
-                        Self::create_immediate_int_array(&nchw_perm),
-                    );
-                    main_block.operations.push(Self::create_mil_operation(
-                        "transpose",
-                        pre_tp,
-                        vec![nchw_in_type],
-                    ));
-
-                    // instance_norm on NCHW intermediate
-                    let nchw_out_name = format!("{}_out_nchw", output_name);
-                    let nchw_out_perm = [0u32, 3, 1, 2];
-                    let nchw_out_shape =
-                        Self::permute_graph_shape(&output_operand.descriptor.shape, &nchw_out_perm);
-                    let nchw_out_dims =
-                        Self::mil_dimensions_from_graph_shape(&nchw_out_shape, false);
-                    let nchw_out_type = NamedValueType {
-                        name: nchw_out_name.clone(),
-                        r#type: Some(ValueType {
-                            r#type: Some(
-                                crate::protos::coreml::mil_spec::value_type::Type::TensorType(
-                                    TensorType {
-                                        rank: nchw_out_dims.len() as i64,
-                                        data_type: dtype,
-                                        dimensions: nchw_out_dims,
-                                        attributes: HashMap::new(),
-                                    },
-                                ),
-                            ),
-                        }),
-                    };
-                    let mut overrides_nchw = operand_name_overrides.clone();
-                    overrides_nchw.insert(input_id, nchw_in_name);
-                    let in_names = Self::input_names_for_operation(graph_info, op, &overrides_nchw);
-                    let norm_op = self.convert_operation_with_input_names_and_outputs(
+                    let output_id = self.push_nhwc_instance_norm(
                         graph_info,
                         op,
-                        &in_names,
-                        vec![nchw_out_type],
-                        mil_ops::INSTANCE_NORM,
+                        &operand_name_overrides,
+                        &mut main_block,
                     )?;
-                    main_block.operations.push(norm_op);
-
-                    // Post-transpose: NCHW [N,C,H,W] -> NHWC [N,H,W,C], perm=[0,2,3,1]
-                    let post_perm = [0u32, 2, 3, 1];
-                    let mut post_tp: HashMap<String, Argument> = HashMap::new();
-                    post_tp.insert("x".to_string(), Self::create_name_argument(nchw_out_name));
-                    post_tp.insert(
-                        "perm".to_string(),
-                        Self::create_immediate_int_array(&post_perm),
-                    );
-                    main_block.operations.push(Self::create_mil_operation(
-                        "transpose",
-                        post_tp,
-                        vec![output_type],
-                    ));
 
                     if let Some((pending_ops, transposed_name)) =
                         deferred_transposes.remove(&output_id)
@@ -11549,61 +11559,20 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                     let input_names =
                         Self::input_names_for_operation(graph_info, op, &operand_name_overrides);
                     let mil_op_type = self.get_mil_op_type(op.op_type())?;
-                    let mut conv_op = self.convert_operation_with_input_names_and_outputs(
+                    let conv_op = self.convert_operation_with_input_names_and_outputs(
                         graph_info,
                         op,
                         &input_names,
                         vec![nchw_out_type],
                         mil_op_type,
                     )?;
-                    let bias_id = match op {
-                        Operation::Conv2d { options, .. } => options.as_ref().and_then(|o| o.bias),
-                        Operation::ConvTranspose2d { options, .. } => {
-                            options.as_ref().and_then(|o| o.bias)
-                        }
-                        _ => None,
-                    }
-                    .filter(|&id| {
-                        graph_info.operand(id).is_some_and(|operand| {
-                            operand.kind != crate::graph::OperandKind::Constant
-                        })
-                    });
-                    if bias_id.is_some() {
-                        conv_op.inputs.remove("bias");
-                    }
                     main_block.operations.push(conv_op);
-
-                    let nchw_result = if let Some(bias_id) = bias_id {
-                        let bias_name = Self::output_name_for_operand(
-                            graph_info,
-                            bias_id,
-                            &operand_name_overrides,
-                        );
-                        let channels = nchw_out_shape[1].get_static_or_max_size();
-                        let bias = Self::rnn_reshape(
-                            &mut main_block,
-                            &bias_name,
-                            &[1, channels, 1, 1],
-                            format!("{output_name}_bias_nchw"),
-                            dtype,
-                        );
-                        Self::binary_with_graph_shape(
-                            &mut main_block,
-                            "add",
-                            &nchw_out_name,
-                            &bias,
-                            format!("{output_name}_biased_nchw"),
-                            dtype,
-                            &nchw_out_shape,
-                        )
-                    } else {
-                        nchw_out_name
-                    };
 
                     // Post-transpose: NCHW [N,C',H',W'] → NHWC [N,H',W',C'], perm=[0,2,3,1]
                     let post_perm = [0u32, 2, 3, 1];
                     let mut post_tp_inputs: HashMap<String, Argument> = HashMap::new();
-                    post_tp_inputs.insert("x".to_string(), Self::create_name_argument(nchw_result));
+                    post_tp_inputs
+                        .insert("x".to_string(), Self::create_name_argument(nchw_out_name));
                     post_tp_inputs.insert(
                         "perm".to_string(),
                         Self::create_immediate_int_array(&post_perm),
@@ -12060,31 +12029,150 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                 }
             }
 
-            let mut operation_overrides = operand_name_overrides.clone();
-            if matches!(
-                op_type_lower.as_str(),
-                "add" | "sub" | "mul" | "div" | "pow" | "min" | "max"
-            ) {
-                for &id in op.input_operands().iter() {
-                    let operand = graph_info.operand(id).unwrap();
-                    if operand.kind == OperandKind::Constant && operand.descriptor.shape.is_empty()
+            // Constant scalars remain rank zero in MIL, while WebNN scalar results
+            // use [1]. Promote one argument so pow infers that same result rank.
+            if matches!(op, Operation::Pow { .. })
+                && op.output_operand().is_some_and(|id| {
+                    graph_info
+                        .operand(id)
+                        .is_some_and(|operand| operand.descriptor.shape.is_empty())
+                })
+                && op.input_operands().iter().all(|&id| {
+                    graph_info.operand(id).is_some_and(|operand| {
+                        operand.kind == OperandKind::Constant && operand.descriptor.shape.is_empty()
+                    })
+                })
+            {
+                let input = op.input_operands()[0];
+                let mut input_names =
+                    Self::input_names_for_operation(graph_info, op, &operand_name_overrides);
+                input_names[0] = Self::rnn_reshape(
+                    &mut main_block,
+                    &input_names[0],
+                    &[1],
+                    format!(
+                        "{}_pow_vector_{}",
+                        input_names[0],
+                        op.output_operand().unwrap()
+                    ),
+                    Self::graph_value_mil_type(
+                        &graph_info.operand(input).unwrap().descriptor.data_type,
+                    )?,
+                );
+                let (_, output) = Self::create_output_value(
+                    graph_info,
+                    op.output_operand().unwrap(),
+                    &operand_name_overrides,
+                )?;
+                main_block
+                    .operations
+                    .push(self.convert_operation_with_input_names_and_outputs(
+                        graph_info,
+                        op,
+                        &input_names,
+                        vec![output],
+                        mil_ops::POW,
+                    )?);
+                continue;
+            }
+
+            let mut mil_op =
+                self.convert_operation_with_overrides(graph_info, op, &operand_name_overrides)?;
+            let mut restore_spatial_shape = None;
+            if let Operation::ConvTranspose2d { options, .. } = op {
+                let ids = op.input_operands();
+                let input = graph_info.operand(ids[0]).unwrap();
+                let filter = graph_info.operand(ids[1]).unwrap();
+                let output = graph_info.operand(op.output_operand().unwrap()).unwrap();
+                let input_shape = input.descriptor.static_or_max_shape();
+                let filter_shape = filter.descriptor.static_or_max_shape();
+                let output_shape = output.descriptor.static_or_max_shape();
+                let native_layout = options.as_ref().is_none_or(|options| {
+                    options.input_layout.as_str() == "nchw"
+                        && options.filter_layout.as_str() == "iohw"
+                });
+                // Apple's height-only transposed convolution repeats values within each
+                // stride when width is one. The equivalent width-only kernel is correct.
+                if native_layout
+                    && input.descriptor.static_shape().is_some()
+                    && filter.descriptor.static_shape().is_some()
+                    && output.descriptor.static_shape().is_some()
+                    && input_shape.len() == 4
+                    && input_shape[3] == 1
+                    && filter_shape.len() == 4
+                    && filter_shape[3] == 1
+                    && output_shape.len() == 4
+                    && output_shape[3] == 1
+                    && input_shape[2] > 1
+                {
+                    let names =
+                        Self::input_names_for_operation(graph_info, op, &operand_name_overrides);
+                    for (index, (name, mut shape, dtype)) in [
+                        (&names[0], input_shape, &input.descriptor.data_type),
+                        (&names[1], filter_shape, &filter.descriptor.data_type),
+                    ]
+                    .into_iter()
+                    .enumerate()
                     {
-                        let original =
-                            Self::output_name_for_operand(graph_info, id, &operation_overrides);
-                        let name = Self::rnn_reshape(
+                        shape.swap(2, 3);
+                        let rotated = Self::rnn_reshape(
                             &mut main_block,
-                            &original,
-                            &[1],
-                            format!("{original}_vector_{}", op.output_operand().unwrap()),
-                            Self::graph_value_mil_type(&operand.descriptor.data_type)?,
+                            name,
+                            &shape,
+                            format!("{}_spatial_width_{}", name, op.output_operand().unwrap()),
+                            Self::graph_value_mil_type(dtype)?,
                         );
-                        operation_overrides.insert(id, name);
+                        mil_op.inputs.insert(
+                            if index == 0 { "x" } else { "weight" }.into(),
+                            Self::create_argument(&rotated),
+                        );
                     }
+                    let defaults = crate::operator_options::MLConvTranspose2dOptions::default();
+                    let options = options.as_ref().unwrap_or(&defaults);
+                    for (name, values, default) in [
+                        ("strides", &options.strides, vec![1, 1]),
+                        ("dilations", &options.dilations, vec![1, 1]),
+                        ("pad", &options.padding, vec![0, 0, 0, 0]),
+                    ] {
+                        let mut values = if values.is_empty() {
+                            default
+                        } else {
+                            values.clone()
+                        };
+                        if values.len() == 2 {
+                            values.swap(0, 1);
+                        } else {
+                            values.rotate_left(2);
+                        }
+                        mil_op
+                            .inputs
+                            .insert(name.into(), Self::create_immediate_int_array(&values));
+                    }
+                    let mut rotated_shape = output_shape.clone();
+                    rotated_shape.swap(2, 3);
+                    let original_name = mil_op.outputs[0].name.clone();
+                    let rotated_name = format!("{}_spatial_width", original_name);
+                    mil_op.outputs[0] = Self::value_type_for_static_shape(
+                        rotated_name.clone(),
+                        Self::graph_value_mil_type(&output.descriptor.data_type)?,
+                        &rotated_shape,
+                    );
+                    mil_op.inputs.insert(
+                        "output_shape".into(),
+                        Self::create_immediate_int_array(&rotated_shape),
+                    );
+                    restore_spatial_shape = Some((
+                        rotated_name,
+                        original_name,
+                        output_shape,
+                        Self::graph_value_mil_type(&output.descriptor.data_type)?,
+                    ));
                 }
             }
-            let mil_op =
-                self.convert_operation_with_overrides(graph_info, op, &operation_overrides)?;
             main_block.operations.push(mil_op);
+            if let Some((rotated, original, shape, dtype)) = restore_spatial_shape {
+                Self::rnn_reshape(&mut main_block, &rotated, &shape, original, dtype);
+            }
 
             // Flush any transpose ops that were waiting for this operation's output, and
             // activate the corresponding operand-name override so that later operations
@@ -12098,7 +12186,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         }
 
         // Add block outputs (output operand names)
-        for &output_id in &graph_info.output_operands {
+        for &output_id in output_operands {
             let operand =
                 graph_info
                     .operand(output_id)
@@ -12222,6 +12310,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                 }
             }
             walk_block_names(&main_block, &mut referenced_names);
+            referenced_names.extend(main_block.outputs.iter().cloned());
         }
         main_function
             .inputs
@@ -12256,7 +12345,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         };
 
         let mut input_descriptions = Vec::new();
-        for &input_id in &graph_info.input_operands {
+        for &input_id in input_operands {
             if let Some(operand) = graph_info.operand(input_id) {
                 let input_name = operand_name(graph_info, input_id);
                 // Unused inputs were dropped from the function signature above;
@@ -12273,7 +12362,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         }
 
         let mut output_descriptions = Vec::new();
-        for &output_id in &graph_info.output_operands {
+        for &output_id in output_operands {
             if let Some(operand) = graph_info.operand(output_id) {
                 let output_name = operand_name(graph_info, output_id);
                 let output_name = equivalent_outputs
@@ -12334,7 +12423,7 @@ impl super::GraphConverter for CoremlMlProgramConverter {
             .any(|(logical, physical)| logical != physical);
         let inputs_changed = inputs.iter().any(|(logical, physical)| logical != physical);
         let passthroughs = input_passthroughs(graph_info);
-        let constant_copies = constant_copies(graph_info, &mut weight_builder);
+        let constant_copies = constant_copies(graph_info, weight_builder);
         let metadata = Some(Metadata {
             user_defined: [
                 (OUTPUT_ALIASES_METADATA_KEY, &aliases, outputs_changed),
@@ -12383,6 +12472,45 @@ impl super::GraphConverter for CoremlMlProgramConverter {
         // Set MLProgram
         model.r#type = Some(crate::protos::coreml::specification::model::Type::MlProgram(program));
 
+        Ok(model)
+    }
+}
+
+impl CoremlMlProgramConverter {
+    /// Convert with an explicit float16 lowering (rustnn extension).
+    ///
+    /// [`GraphConverter::convert`](super::GraphConverter::convert) uses
+    /// [`CoremlFloat16Precision::Native`](crate::mlcontext::CoremlFloat16Precision::Native);
+    /// the CoreML backend passes
+    /// [`CoremlOptions::float16_precision`](crate::mlcontext::CoremlOptions::float16_precision).
+    pub fn convert_with_float16_precision(
+        &self,
+        graph_info: &GraphInfo,
+        precision: crate::mlcontextoptions::CoremlFloat16Precision,
+    ) -> Result<super::ConvertedGraph, GraphError> {
+        if !crate::graph::dynamic_inputs_enabled() && graph_info.has_dynamic_dimensions() {
+            return Err(GraphError::DynamicInputsFeatureDisabled);
+        }
+        // Fold transposes, reshapes and casts of constants into new constants first, for
+        // both float16 lowerings: the Neural Engine admits `matmul(x, const)` but not
+        // `matmul(x, transpose(const))`, and the literal lowering would also transpose the
+        // weight on every dispatch.
+        let folded = super::coreml_constant_fold::fold_constant_views(graph_info);
+        let graph_info = folded.as_ref().unwrap_or(graph_info);
+        let mut lowering_graph = LoweringGraph::new(graph_info)?;
+        lowering_graph.exact_float16 =
+            precision == crate::mlcontextoptions::CoremlFloat16Precision::Exact;
+        let graph_info = &lowering_graph;
+        let mut weight_builder = super::WeightFileBuilder::new();
+        weight_builder.reserve(
+            graph_info
+                .constant_operand_ids_to_handles
+                .values()
+                .map(|c| c.data.len() + 128)
+                .sum(),
+        );
+        let model = self.convert_with_precision_boundaries(graph_info, &mut weight_builder)?;
+
         // Serialize to bytes
         let mut buffer = Vec::new();
         model
@@ -12405,6 +12533,19 @@ impl super::GraphConverter for CoremlMlProgramConverter {
             data: buffer,
             weights_data,
         })
+    }
+}
+
+impl super::GraphConverter for CoremlMlProgramConverter {
+    fn format(&self) -> &'static str {
+        "coreml"
+    }
+
+    fn convert(&self, graph_info: &GraphInfo) -> Result<super::ConvertedGraph, GraphError> {
+        self.convert_with_float16_precision(
+            graph_info,
+            crate::mlcontextoptions::CoremlFloat16Precision::Native,
+        )
     }
 }
 
@@ -12452,6 +12593,234 @@ mod tests {
 
     fn s(shape: &[u32]) -> Vec<crate::graph::Dimension> {
         crate::graph::to_dimension_vector(shape)
+    }
+
+    fn constant_copy_asset_graph() -> GraphInfo {
+        let descriptor = OperandDescriptor {
+            data_type: DataType::Float32,
+            shape: s(&[2]),
+            pending_permutation: vec![],
+        };
+        GraphInfo {
+            operands: (0..=5)
+                .map(|id| Operand {
+                    kind: match id {
+                        0 => OperandKind::Constant,
+                        5 => OperandKind::Output,
+                        _ => OperandKind::Intermediate,
+                    },
+                    name: Some(format!("copy{id}")),
+                    descriptor: descriptor.clone(),
+                })
+                .collect(),
+            output_operands: vec![5],
+            constant_operand_ids_to_handles: HashMap::from([(
+                0,
+                ConstantData {
+                    data: [1.0003f32, -0.0]
+                        .into_iter()
+                        .flat_map(f32::to_le_bytes)
+                        .collect(),
+                    label: None,
+                },
+            )]),
+            operations: vec![
+                Operation::Identity {
+                    input: 0,
+                    options: None,
+                    outputs: vec![1],
+                },
+                Operation::Transpose {
+                    input: 1,
+                    options: None,
+                    outputs: vec![2],
+                },
+                Operation::Cast {
+                    input: 2,
+                    data_type: MLOperandDataType::Float32,
+                    options: None,
+                    outputs: vec![3],
+                },
+                Operation::Slice {
+                    input: 3,
+                    starts: vec![0],
+                    sizes: vec![MLDimension::Static(2)],
+                    options: None,
+                    outputs: vec![4],
+                },
+                Operation::Reshape {
+                    input: 4,
+                    new_shape: vec![MLDimension::Static(2)],
+                    options: None,
+                    outputs: vec![5],
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn constant_copy_asset_accepts_only_source_proven_public_copies() {
+        let graph = constant_copy_asset_graph();
+        let model = CoremlMlProgramConverter.convert(&graph).unwrap().data;
+        assert!(CoremlMlProgramConverter::constant_copy_asset_eligible(
+            &graph, &model,
+        ));
+
+        let mut no_outputs = graph.clone();
+        no_outputs.output_operands.clear();
+        let mut nonpublic_output = graph.clone();
+        nonpublic_output.operands[5].kind = OperandKind::Intermediate;
+        let mut runtime_input = graph.clone();
+        runtime_input.operands[0].kind = OperandKind::Input;
+        runtime_input.input_operands.push(0);
+        runtime_input.constant_operand_ids_to_handles.clear();
+        let mut malformed_constant = graph.clone();
+        malformed_constant
+            .constant_operand_ids_to_handles
+            .get_mut(&0)
+            .unwrap()
+            .data
+            .pop();
+        let mut out_of_order = graph.clone();
+        out_of_order.operations.swap(0, 1);
+        let mut repeated_producer = graph.clone();
+        repeated_producer
+            .operations
+            .push(repeated_producer.operations[0].clone());
+        let mut invalid_reference = graph.clone();
+        invalid_reference.operations[0] = Operation::Identity {
+            input: u32::MAX,
+            options: None,
+            outputs: vec![1],
+        };
+        for (label, rejected) in [
+            ("empty outputs", no_outputs),
+            ("nonpublic output", nonpublic_output),
+            ("runtime input", runtime_input),
+            ("malformed constant length", malformed_constant),
+            ("out-of-order constant copy", out_of_order),
+            ("repeated constant-copy producer", repeated_producer),
+            ("invalid constant-copy reference", invalid_reference),
+        ] {
+            assert!(
+                !CoremlMlProgramConverter::constant_copy_asset_eligible(&rejected, &model),
+                "{label}",
+            );
+        }
+    }
+
+    #[test]
+    fn shared_program_builder_reuses_original_immediate_constant_record() {
+        let mut graph = constant_copy_asset_graph();
+        graph.operands.truncate(2);
+        graph.operations.truncate(1);
+        graph.output_operands = vec![1];
+        graph.operands[1].kind = OperandKind::Output;
+        for operand in &mut graph.operands {
+            operand.descriptor.data_type = DataType::Int32;
+        }
+        graph
+            .constant_operand_ids_to_handles
+            .get_mut(&0)
+            .unwrap()
+            .data = [16_777_217i32, i32::MIN]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let graph = LoweringGraph::new(&graph).unwrap();
+        let mut weights = super::super::WeightFileBuilder::new();
+        let metadata: Vec<_> = (0..2)
+            .map(|_| {
+                let model = CoremlMlProgramConverter
+                    .convert_program(
+                        &graph,
+                        &graph.input_operands,
+                        &graph.output_operands,
+                        &graph.operations,
+                        &mut weights,
+                    )
+                    .unwrap();
+                model.description.unwrap().metadata.unwrap().user_defined
+                    [OUTPUT_CONSTANT_COPIES_METADATA_KEY]
+                    .clone()
+            })
+            .collect();
+        assert_eq!(metadata[0], metadata[1]);
+        let weights = weights.finalize();
+        assert_eq!(u32::from_le_bytes(weights[..4].try_into().unwrap()), 1);
+        assert_eq!(
+            &weights[128..136],
+            &graph.constant_operand_ids_to_handles[&0].data,
+        );
+    }
+
+    #[test]
+    fn constant_copy_asset_rejects_dead_arithmetic_and_typed_boundaries() {
+        let graph = constant_copy_asset_graph();
+        let model = CoremlMlProgramConverter.convert(&graph).unwrap().data;
+        for narrowing in [false, true] {
+            let mut rejected = graph.clone();
+            let mut dead = rejected.operands[1].clone();
+            dead.name = Some("dead".into());
+            if narrowing {
+                dead.descriptor.data_type = DataType::Float16;
+            }
+            rejected.operands.push(dead);
+            rejected.operations.push(if narrowing {
+                Operation::Cast {
+                    input: 0,
+                    data_type: MLOperandDataType::Float16,
+                    options: None,
+                    outputs: vec![6],
+                }
+            } else {
+                Operation::Neg {
+                    input: 0,
+                    options: None,
+                    outputs: vec![6],
+                }
+            });
+            assert!(
+                !CoremlMlProgramConverter::constant_copy_asset_eligible(&rejected, &model),
+                "dead narrowing={narrowing}",
+            );
+        }
+    }
+
+    #[test]
+    fn constant_copy_asset_rejects_mixed_computed_outputs() {
+        let mut graph = constant_copy_asset_graph();
+        let model = CoremlMlProgramConverter.convert(&graph).unwrap().data;
+        let mut computed = graph.operands[5].clone();
+        computed.name = Some("computed".into());
+        graph.operands.push(computed);
+        graph.output_operands.push(6);
+        graph.operations.push(Operation::Neg {
+            input: 0,
+            options: None,
+            outputs: vec![6],
+        });
+        assert!(!CoremlMlProgramConverter::constant_copy_asset_eligible(
+            &graph, &model,
+        ));
+    }
+
+    #[test]
+    fn constant_copy_asset_requires_decodable_mlprogram() {
+        let graph = constant_copy_asset_graph();
+        let pipeline = Model {
+            r#type: Some(crate::protos::coreml::specification::model::Type::Pipeline(
+                Default::default(),
+            )),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        for rejected in [pipeline, Model::default().encode_to_vec(), vec![0xff]] {
+            assert!(!CoremlMlProgramConverter::constant_copy_asset_eligible(
+                &graph, &rejected,
+            ));
+        }
     }
 
     #[test]
@@ -12544,12 +12913,32 @@ mod tests {
         for dtype in [DataType::Float16, DataType::Float32] {
             for (upper, diagonal) in [(true, 1), (false, -1)] {
                 let graph = triangular_graph(dtype, s(&[3, 4]), upper, diagonal);
+                let graph = LoweringGraph::new(&graph).unwrap();
+                // Check the triangular lowering itself, before precision
+                // transport introduces casts and native Pipeline interfaces.
+                let lowered = CoremlMlProgramConverter
+                    .convert_program(
+                        &graph,
+                        &graph.input_operands,
+                        &graph.output_operands,
+                        &graph.operations,
+                        &mut super::super::WeightFileBuilder::new(),
+                    )
+                    .unwrap();
+                let Some(crate::protos::coreml::specification::model::Type::MlProgram(program)) =
+                    lowered.r#type
+                else {
+                    panic!("lowered MLProgram")
+                };
+                let block = &program.functions["main"].block_specializations["CoreML7"];
                 assert_eq!(
-                    main_operation_types(&graph),
+                    block
+                        .operations
+                        .iter()
+                        .map(|op| op.r#type.as_str())
+                        .collect::<Vec<_>>(),
                     ["fill_like", "band_part", "equal", "select"]
                 );
-                let converted = CoremlMlProgramConverter.convert(&graph).unwrap();
-                let block = decode_main_block(&converted.data);
                 let select = block.operations.last().unwrap();
                 assert_eq!(
                     select.inputs["a"],
@@ -12569,13 +12958,10 @@ mod tests {
     }
 
     #[test]
-    fn triangular_int32_excluding_main_preserves_values_with_slices() {
+    fn triangular_int32_excluding_main_retains_integer_subtraction() {
         for (upper, diagonal) in [(true, 1), (false, -1)] {
             let graph = triangular_graph(DataType::Int32, s(&[3, 4]), upper, diagonal);
-            let operations = main_operation_types(&graph);
-            assert!(operations.iter().any(|op| op == "slice_by_size"));
-            assert!(operations.iter().any(|op| op == "concat"));
-            assert!(!operations.iter().any(|op| op == "band_part" || op == "sub"));
+            assert_eq!(main_operation_types(&graph), ["band_part", "sub"]);
         }
     }
 
@@ -12833,16 +13219,22 @@ mod tests {
             .convert(&graph)
             .expect("CoreML resample2d conversion");
         let main_block = decode_main_block(&converted.data);
-        let gathers: Vec<_> = main_block
+        let transposes: Vec<_> = main_block
             .operations
             .iter()
-            .filter(|op| op.r#type == "gather")
+            .filter(|op| op.r#type == "transpose")
             .collect();
-        assert_eq!(gathers.len(), 2);
-        assert_eq!(immediate_int_argument(&gathers[0].inputs["axis"]), 0);
-        assert_eq!(immediate_int_argument(&gathers[1].inputs["axis"]), 1);
+        assert_eq!(transposes.len(), 2, "expected pre/post transposes");
+        assert_eq!(
+            immediate_int_values(transposes[0].inputs.get("perm").expect("pre perm")),
+            [2, 3, 0, 1]
+        );
+        assert_eq!(
+            immediate_int_values(transposes[1].inputs.get("perm").expect("post perm")),
+            [2, 3, 0, 1]
+        );
         assert!(
-            !main_block
+            main_block
                 .operations
                 .iter()
                 .any(|op| op.r#type == mil_ops::UPSAMPLE_NEAREST_NEIGHBOR)
@@ -13006,515 +13398,6 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn instance_normalization_float16_subnormal_constant_affine() {
-        use crate::executors::coreml::{CoremlInput, run_coreml_with_inputs_with_weights};
-        use crate::operator_options::MLInstanceNormalizationOptions;
-        let descriptor = |shape: &[u32]| OperandDescriptor {
-            data_type: DataType::Float16,
-            shape: s(shape),
-            pending_permutation: vec![],
-        };
-        let mut graph = GraphInfo {
-            input_operands: vec![0],
-            output_operands: vec![3],
-            operands: vec![
-                Operand {
-                    name: Some("input".into()),
-                    kind: OperandKind::Input,
-                    descriptor: descriptor(&[1, 2, 2, 2]),
-                },
-                Operand {
-                    name: Some("scale".into()),
-                    kind: OperandKind::Constant,
-                    descriptor: descriptor(&[2]),
-                },
-                Operand {
-                    name: Some("bias".into()),
-                    kind: OperandKind::Constant,
-                    descriptor: descriptor(&[2]),
-                },
-                Operand {
-                    name: Some("output".into()),
-                    kind: OperandKind::Output,
-                    descriptor: descriptor(&[1, 2, 2, 2]),
-                },
-            ],
-            operations: vec![Operation::InstanceNormalization {
-                input: 0,
-                options: Some(MLInstanceNormalizationOptions {
-                    scale: Some(1),
-                    bias: Some(2),
-                    epsilon: 0.0,
-                    layout: "nchw".into(),
-                    ..Default::default()
-                }),
-                outputs: vec![3],
-            }],
-            ..Default::default()
-        };
-        for (id, values) in [(1, [0.5f32, 2.0]), (2, [0.25, -0.5])] {
-            let data = values
-                .into_iter()
-                .flat_map(|v| half::f16::from_f32(v).to_le_bytes())
-                .collect();
-            graph
-                .constant_operand_ids_to_handles
-                .insert(id, ConstantData { data, label: None });
-        }
-        let converted = CoremlMlProgramConverter.convert(&graph).unwrap();
-        let unit = 2.0f32.powi(-24);
-        let attempts = run_coreml_with_inputs_with_weights(
-            &converted.data,
-            converted.weights_data.as_deref(),
-            vec![CoremlInput {
-                name: "input".to_owned(),
-                shape: vec![1, 2, 2, 2],
-                data: vec![
-                    unit,
-                    -unit,
-                    unit,
-                    -unit,
-                    2.0 * unit,
-                    -2.0 * unit,
-                    2.0 * unit,
-                    -2.0 * unit,
-                ],
-            }],
-        )
-        .unwrap();
-        for attempt in attempts {
-            let outputs = attempt.result.unwrap();
-            assert_eq!(
-                outputs[0].data,
-                [0.75, -0.25, 0.75, -0.25, 1.5, -2.5, 1.5, -2.5],
-                "{}",
-                attempt.compute_unit
-            );
-        }
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn normalization_bias_broadcast_preserves_channels() {
-        let operation = Operation::InstanceNormalization {
-            input: 0,
-            options: Some(crate::operator_options::MLInstanceNormalizationOptions {
-                bias: Some(2),
-                ..Default::default()
-            }),
-            outputs: vec![1],
-        };
-        let mut graph =
-            unary_test_graph(DataType::Float32, &[2, 3, 2, 2], &[2, 3, 2, 2], operation);
-        graph.operands.push(Operand {
-            name: Some("bias".into()),
-            kind: OperandKind::Constant,
-            descriptor: OperandDescriptor {
-                data_type: DataType::Float32,
-                shape: s(&[3]),
-                pending_permutation: vec![],
-            },
-        });
-        let bias: [f32; 3] = [-33.048641204833984, 4.511423587799072, -37.93617248535156];
-        graph.constant_operand_ids_to_handles.insert(
-            2,
-            ConstantData {
-                data: bytemuck::cast_slice(&bias).to_vec(),
-                label: None,
-            },
-        );
-        let input: [f32; 24] = [
-            -97.949951171875,
-            29.44037628173828,
-            -73.92131042480469,
-            -38.11185836791992,
-            41.33772659301758,
-            -59.77853012084961,
-            -74.66901397705078,
-            -68.16508483886719,
-            35.82481384277344,
-            -6.948329448699951,
-            54.42462158203125,
-            47.53074645996094,
-            66.93562316894531,
-            76.74034881591797,
-            5.6758809089660645,
-            25.68659210205078,
-            37.37651062011719,
-            56.252689361572266,
-            -16.574905395507812,
-            42.949893951416016,
-            73.8739242553711,
-            -99.00035095214844,
-            -33.11322784423828,
-            -17.380685806274414,
-        ];
-        let expected: [f32; 24] = [
-            -34.148170471191406,
-            -31.496057510375977,
-            -33.64792251586914,
-            -32.90241241455078,
-            6.232718467712402,
-            4.1012163162231445,
-            3.7873291969299316,
-            3.9244301319122314,
-            -37.80543899536133,
-            -39.59950256347656,
-            -37.02529525756836,
-            -37.314449310302734,
-            -32.253929138183594,
-            -31.917720794677734,
-            -34.35454559326172,
-            -33.66836929321289,
-            4.777193546295166,
-            5.4573845863342285,
-            2.8330893516540527,
-            4.978026866912842,
-            -36.43245315551758,
-            -39.23432159423828,
-            -38.16645050048828,
-            -37.91146469116211,
-        ];
-        for memory in [false, true] {
-            let actual = native_unary_result(&graph, bytemuck::cast_slice(&input), memory);
-            for (actual, expected) in actual.chunks_exact(4).zip(expected) {
-                let actual = f32::from_le_bytes(actual.try_into().unwrap());
-                assert!(
-                    (actual - expected).abs() < 0.0001,
-                    "actual={actual} expected={expected} memory={memory}"
-                );
-            }
-        }
-    }
-
-    fn unary_test_graph(
-        dtype: DataType,
-        input_shape: &[u32],
-        output_shape: &[u32],
-        operation: Operation,
-    ) -> GraphInfo {
-        GraphInfo {
-            input_operands: vec![0],
-            output_operands: vec![1],
-            operands: [
-                ("input", OperandKind::Input, input_shape),
-                ("result", OperandKind::Output, output_shape),
-            ]
-            .into_iter()
-            .map(|(name, kind, shape)| Operand {
-                name: Some(name.into()),
-                kind,
-                descriptor: OperandDescriptor {
-                    data_type: dtype,
-                    shape: s(shape),
-                    pending_permutation: vec![],
-                },
-            })
-            .collect(),
-            operations: vec![operation],
-            ..Default::default()
-        }
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    fn native_unary_result(graph: &GraphInfo, input: &[u8], memory: bool) -> Vec<u8> {
-        use crate::executors::coreml::{CoremlByteInput, compile_model, run_coreml_bytes};
-        let converted = CoremlMlProgramConverter.convert(graph).unwrap();
-        let model = compile_model(
-            converted.data,
-            converted.weights_data,
-            crate::backend_selection::DeviceType::Cpu,
-            memory,
-        )
-        .unwrap();
-        let inputs = HashMap::from([(
-            "input".to_owned(),
-            CoremlByteInput {
-                descriptor: &graph.operands[0].descriptor,
-                data: input,
-            },
-        )]);
-        let outputs = HashMap::from([("result".to_owned(), graph.operands[1].descriptor.clone())]);
-        run_coreml_bytes(&model, &inputs, &outputs)
-            .unwrap()
-            .remove(&"result".to_owned())
-            .unwrap()
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn integer_boundaries_remain_exact() {
-        let input = [
-            i32::MIN,
-            -2147483646,
-            -16777217,
-            0,
-            16777217,
-            2147483646,
-            i32::MAX,
-        ];
-        for (kind, expected, options) in [
-            (
-                "abs",
-                [
-                    i32::MAX,
-                    2147483646,
-                    16777217,
-                    0,
-                    16777217,
-                    2147483646,
-                    i32::MAX,
-                ],
-                serde_json::json!({}),
-            ),
-            (
-                "neg",
-                [
-                    i32::MAX,
-                    2147483646,
-                    16777217,
-                    0,
-                    -16777217,
-                    -2147483646,
-                    -i32::MAX,
-                ],
-                serde_json::json!({}),
-            ),
-            (
-                "relu",
-                [0, 0, 0, 0, 16777217, 2147483646, i32::MAX],
-                serde_json::json!({}),
-            ),
-            (
-                "clamp",
-                [
-                    -2147483646,
-                    -2147483646,
-                    -16777217,
-                    0,
-                    16777217,
-                    2147483645,
-                    2147483645,
-                ],
-                serde_json::json!({"minValue": -2147483646, "maxValue": 2147483645}),
-            ),
-        ] {
-            let operation = op_from_operator_options(
-                kind,
-                vec![0],
-                Some(1),
-                vec![],
-                OperatorOptions::from_json_with_op_type(kind, &options).unwrap(),
-            );
-            let graph = unary_test_graph(DataType::Int32, &[7], &[7], operation);
-            for memory in [false] {
-                let actual = native_unary_result(&graph, bytemuck::cast_slice(&input), memory);
-                assert_eq!(
-                    actual,
-                    bytemuck::cast_slice::<i32, u8>(&expected),
-                    "{kind} memory={memory}"
-                );
-            }
-        }
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn triangular_int32_preserves_boundary_bits() {
-        let input = [16777217i32, 2147483646, -2147483646, -16777217];
-        for (upper, diagonal, expected) in [
-            (true, 1, [0, 2147483646, 0, 0]),
-            (false, -1, [0, 0, -2147483646, 0]),
-        ] {
-            let graph = triangular_graph(DataType::Int32, s(&[2, 2]), upper, diagonal);
-            for memory in [false] {
-                assert_eq!(
-                    native_unary_result(&graph, bytemuck::cast_slice(&input), memory),
-                    bytemuck::cast_slice::<i32, u8>(&expected),
-                    "memory={memory}"
-                );
-            }
-        }
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn tile_concat_preserves_tensor_order() {
-        let graph = unary_test_graph(
-            DataType::Float32,
-            &[2, 2],
-            &[4, 6],
-            Operation::Tile {
-                input: 0,
-                repetitions: vec![2, 3],
-                options: None,
-                outputs: vec![1],
-            },
-        );
-        let input = [1f32, 2., 3., 4.];
-        let expected = [
-            1f32, 2., 1., 2., 1., 2., 3., 4., 3., 4., 3., 4., 1., 2., 1., 2., 1., 2., 3., 4., 3.,
-            4., 3., 4.,
-        ];
-        for memory in [false, true] {
-            assert_eq!(
-                native_unary_result(&graph, bytemuck::cast_slice(&input), memory),
-                bytemuck::cast_slice::<f32, u8>(&expected)
-            );
-        }
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn nearest_resample_uses_half_pixel_ties_smaller() {
-        for (input, sizes, scales, expected) in [
-            (
-                vec![10f32, 20., 30.],
-                None,
-                vec![1., 1.5],
-                vec![10f32, 20., 20., 30.],
-            ),
-            (
-                vec![10f32, 20., 30., 40.],
-                None,
-                vec![1., 0.75],
-                vec![10f32, 20., 40.],
-            ),
-            (
-                vec![10f32, 20.],
-                Some(vec![1, 3]),
-                vec![],
-                vec![10f32, 10., 20.],
-            ),
-        ] {
-            let options = crate::operator_options::MLResample2dOptions {
-                sizes,
-                scales,
-                ..Default::default()
-            };
-            let graph = unary_test_graph(
-                DataType::Float32,
-                &[1, 1, 1, input.len() as u32],
-                &[1, 1, 1, expected.len() as u32],
-                Operation::Resample2d {
-                    input: 0,
-                    options: Some(options),
-                    outputs: vec![1],
-                },
-            );
-            for memory in [false, true] {
-                assert_eq!(
-                    native_unary_result(&graph, bytemuck::cast_slice(&input), memory),
-                    bytemuck::cast_slice::<f32, u8>(&expected)
-                );
-            }
-        }
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn multidimensional_padding_uses_each_axis() {
-        for (mode, expected) in [
-            (MLPaddingMode::Edge, [1f32, 1., 2., 1., 1., 2., 3., 3., 4.]),
-            (
-                MLPaddingMode::Reflection,
-                [4f32, 3., 4., 2., 1., 2., 4., 3., 4.],
-            ),
-        ] {
-            let graph = unary_test_graph(
-                DataType::Float32,
-                &[1, 1, 2, 2],
-                &[1, 1, 3, 3],
-                Operation::Pad {
-                    input: 0,
-                    beginning_padding: vec![0, 0, 1, 1],
-                    ending_padding: vec![0, 0, 0, 0],
-                    options: Some(crate::operator_options::MLPadOptions {
-                        mode,
-                        ..Default::default()
-                    }),
-                    outputs: vec![1],
-                },
-            );
-            for memory in [false, true] {
-                assert_eq!(
-                    native_unary_result(&graph, bytemuck::cast_slice(&[1f32, 2., 3., 4.]), memory),
-                    bytemuck::cast_slice::<f32, u8>(&expected)
-                );
-            }
-        }
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn scalar_constants_in_binary_expression_use_physical_output_shape() {
-        use crate::executors::coreml::{compile_model, run_coreml_bytes};
-        let operation = op_from_operator_options(
-            "add",
-            vec![0, 2],
-            Some(1),
-            vec![],
-            OperatorOptions::from_json_with_op_type("add", &serde_json::json!({})).unwrap(),
-        );
-        let mut graph = unary_test_graph(DataType::Int32, &[], &[], operation);
-        graph.operands[0].kind = OperandKind::Constant;
-        graph.input_operands.clear();
-        graph.operands.push(graph.operands[0].clone());
-        graph.operands[2].name = Some("second".into());
-        for (id, value) in [(0, 7i32), (2, 11i32)] {
-            graph.constant_operand_ids_to_handles.insert(
-                id,
-                ConstantData {
-                    data: value.to_le_bytes().to_vec(),
-                    label: None,
-                },
-            );
-        }
-        let converted = CoremlMlProgramConverter.convert(&graph).unwrap();
-        let model = compile_model(
-            converted.data,
-            converted.weights_data,
-            crate::backend_selection::DeviceType::Cpu,
-            false,
-        )
-        .unwrap();
-        let outputs = HashMap::from([("result".to_owned(), graph.operands[1].descriptor.clone())]);
-        let actual = run_coreml_bytes(&model, &HashMap::new(), &outputs).unwrap();
-        assert_eq!(actual[&"result".to_owned()], 18i32.to_le_bytes());
-    }
-
-    #[cfg(all(feature = "coreml-runtime", target_os = "macos"))]
-    #[test]
-    fn dilated_pooling_reduces_selected_samples() {
-        for (kind, expected) in [
-            ("averagePool2d", 5f32),
-            ("maxPool2d", 9f32),
-            ("l2Pool2d", 140f32.sqrt()),
-        ] {
-            let options = OperatorOptions::from_json_with_op_type(
-                kind,
-                &serde_json::json!({"windowDimensions":[2,2], "dilations":[2,2]}),
-            )
-            .unwrap();
-            let operation = op_from_operator_options(kind, vec![0], Some(1), vec![], options);
-            let graph =
-                unary_test_graph(DataType::Float32, &[1, 1, 3, 3], &[1, 1, 1, 1], operation);
-            for memory in [false, true] {
-                let actual = native_unary_result(
-                    &graph,
-                    bytemuck::cast_slice(&[1f32, 2., 3., 4., 5., 6., 7., 8., 9.]),
-                    memory,
-                );
-                assert!(
-                    (f32::from_le_bytes(actual.try_into().unwrap()) - expected).abs() <= 0.00001,
-                    "{kind}"
-                );
-            }
-        }
-    }
-
     /// Helper to create a simple graph with a Float16 constant
     fn create_graph_with_float16_constant(
         shape: Vec<crate::graph::Dimension>,
@@ -13592,6 +13475,94 @@ mod tests {
         let parsed_finite =
             CoremlMlProgramConverter::parse_mlnumber_f64(Some(&finite)).expect("parse finite");
         assert_eq!(parsed_finite, 3.5);
+    }
+
+    /// The backend routes an input-free program without float16 operands by the native rule
+    /// under either lowering, because the exact lowering emits the same model for it. Graphs
+    /// with float32 inputs and integer constants are covered here.
+    #[test]
+    fn exact_lowering_matches_native_without_float16_operands() {
+        use crate::mlcontext::CoremlFloat16Precision;
+        let operand = |name: &str, kind, data_type| Operand {
+            name: Some(name.to_string()),
+            kind,
+            descriptor: OperandDescriptor {
+                data_type,
+                shape: s(&[4]),
+                pending_permutation: vec![],
+            },
+        };
+        let pow = GraphInfo {
+            input_operands: vec![0, 1],
+            output_operands: vec![2],
+            operands: vec![
+                operand("base", OperandKind::Input, DataType::Float32),
+                operand("exponent", OperandKind::Input, DataType::Float32),
+                operand("result", OperandKind::Output, DataType::Float32),
+            ],
+            operations: vec![Operation::Pow {
+                a: 0,
+                b: 1,
+                options: None,
+                outputs: vec![2],
+            }],
+            constant_operand_ids_to_handles: HashMap::new(),
+            quantized: false,
+        };
+        let is_nan = GraphInfo {
+            input_operands: vec![0],
+            output_operands: vec![1],
+            operands: vec![
+                operand("input", OperandKind::Input, DataType::Float32),
+                operand("result", OperandKind::Output, DataType::Uint8),
+            ],
+            operations: vec![Operation::IsNaN {
+                input: 0,
+                options: None,
+                outputs: vec![1],
+            }],
+            constant_operand_ids_to_handles: HashMap::new(),
+            quantized: false,
+        };
+        let clamp = GraphInfo {
+            input_operands: vec![],
+            output_operands: vec![1],
+            operands: vec![
+                operand("clampInput", OperandKind::Constant, DataType::Uint8),
+                operand("clampOutput", OperandKind::Output, DataType::Uint8),
+            ],
+            operations: vec![Operation::Clamp {
+                input: 0,
+                options: Some(crate::operator_options::MLClampOptions {
+                    min_value: Some(serde_json::json!(1000)),
+                    ..Default::default()
+                }),
+                outputs: vec![1],
+            }],
+            constant_operand_ids_to_handles: HashMap::from([(
+                0,
+                ConstantData {
+                    data: vec![255, 127, 5, 0],
+                    label: None,
+                },
+            )]),
+            quantized: false,
+        };
+        for (name, graph) in [("pow", pow), ("isNaN", is_nan), ("clamp", clamp)] {
+            let native = CoremlMlProgramConverter
+                .convert_with_float16_precision(&graph, CoremlFloat16Precision::Native)
+                .expect("native conversion");
+            let exact = CoremlMlProgramConverter
+                .convert_with_float16_precision(&graph, CoremlFloat16Precision::Exact)
+                .expect("exact conversion");
+            // Protobuf map fields serialize in hash order, so compare the decoded models.
+            assert_eq!(
+                Model::decode(native.data.as_slice()).unwrap(),
+                Model::decode(exact.data.as_slice()).unwrap(),
+                "{name}: model"
+            );
+            assert_eq!(native.weights_data, exact.weights_data, "{name}: weights");
+        }
     }
 
     #[test]
