@@ -208,6 +208,13 @@ pub unsafe extern "C" fn webnn_context_create(
     ffi_call(|| {
         let options = MLContextOptions::new(power_preference.into(), accelerated);
         let created = MLContext::create(&options)?;
+        if std::env::var_os("WEBNN_INTERNAL_LOG").is_some() {
+            eprintln!(
+                "[WebNN internal pid={}] context: power={power_preference:?} accelerated={accelerated} selected={:?}",
+                std::process::id(),
+                created.rustnn_device()
+            );
+        }
         unsafe { *context = Box::into_raw(Box::new(WebnnContext(created))) };
         Ok(())
     })
@@ -356,7 +363,21 @@ pub unsafe extern "C" fn webnn_graph_builder_build(
                 return Err(Error::InvalidArgument(format!("duplicate output name: {name}")));
             }
         }
-        let built = builder.0.build(&named)?;
+        let result = builder.0.build(&named);
+        if std::env::var_os("WEBNN_INTERNAL_LOG").is_some() {
+            match &result {
+                Ok(built) => eprintln!(
+                    "[WebNN internal pid={}] model load: {:?}",
+                    std::process::id(),
+                    built.rustnn_load_diagnostics()
+                ),
+                Err(error) => eprintln!(
+                    "[WebNN internal pid={}] model build failed: {error}",
+                    std::process::id()
+                ),
+            }
+        }
+        let built = result?;
         unsafe { *graph = Box::into_raw(Box::new(WebnnGraph(built))) };
         Ok(())
     })
@@ -399,6 +420,13 @@ pub unsafe extern "C" fn webnn_context_dispatch(
         let inputs = unsafe { named_tensors(inputs, inputs_len)? };
         let outputs = unsafe { named_tensors(outputs, outputs_len)? };
         context.0.dispatch(&mut graph.0, &inputs, &outputs)?;
+        if std::env::var_os("WEBNN_INTERNAL_LOG").is_some() {
+            eprintln!(
+                "[WebNN internal pid={}] dispatch statistics: {:?}",
+                std::process::id(),
+                context.0.rustnn_backend_statistics()
+            );
+        }
         Ok(())
     })
 }
