@@ -145,15 +145,14 @@ static const char SandboxPolicyHWInference[] = R"SANDBOX_LITERAL(
       (require-not (vnode-type SYMLINK))
       (subpath bundleIDCacheDir)))
 
-  ; Temporary files for WebNN: the CoreML model packages it writes (must match
-  ; the directory WebNNParent uses), the working directories CoreML creates to
+  ; Temporary files for WebNN: the CoreML model packages RustNN writes in
+  ; the user temp directory, the working directories CoreML creates to
   ; compile them, the compiled models CoreML moves next to them, named after
   ; the packages, and the MPSGraph cache.
   (allow file-read* file-write*
     (require-all
       (require-not (vnode-type SYMLINK))
       (require-any
-        (subpath (string-append userTempDir "/org.mozilla.webnn"))
         (subpath (string-append userTempDir "/TemporaryItems"))
         (prefix (string-append userTempDir "/rustnn_coreml_"))
         (subpath (string-append userTempDir "/com.apple.MetalPerformanceShadersGraph")))))
