@@ -59,7 +59,11 @@ static const char SandboxPolicyHWInference[] = R"SANDBOX_LITERAL(
     (sysctl-name "kern.osproductversion")
     (sysctl-name "kern.version")
     (sysctl-name "kern.hostname")
+    (sysctl-name "kern.hv_vmm_present")
+    (sysctl-name "kern.willshutdown")
     (sysctl-name "hw.machine")
+    (sysctl-name "hw.cpufamily")
+    (sysctl-name "hw.cpusubfamily")
     (sysctl-name "hw.memsize")
     (sysctl-name "hw.model")
     (sysctl-name "hw.ncpu")
@@ -157,6 +161,13 @@ static const char SandboxPolicyHWInference[] = R"SANDBOX_LITERAL(
         (prefix (string-append userTempDir "/rustnn_coreml_"))
         (subpath (string-append userTempDir "/com.apple.MetalPerformanceShadersGraph")))))
 
+  ; MPSGraph uses a symbolic link as its temporary package lock.
+  (allow file-write-create file-write-unlink
+    (require-all
+      (vnode-type SYMLINK)
+      (subpath (string-append userTempDir "/TemporaryItems"))
+      (regex #"/temporary\.mpsgraphpackage\.lock\.lock$")))
+
   ; Allow issuing sandbox extensions for the MTLCompilerService process
   ; to be able to read and write files in the bundle ID cache dir in the
   ; "com.apple.{metalfe,gpuarchiver}" subdirectories. Only observed
@@ -180,6 +191,20 @@ static const char SandboxPolicyHWInference[] = R"SANDBOX_LITERAL(
     (iokit-property "gpu-core-count")
     ; CoreML checks for a Neural Engine.
     (iokit-property "ane-type"))
+
+  ; Metal queries the device generation and registry property names.
+  (with-filter (iokit-registry-entry-class "IOPlatformDevice")
+    (allow iokit-get-properties
+      (iokit-property "soc-generation")
+      (iokit-property "product-id")
+      (iokit-property "ean-storage-present")))
+  (with-filter (iokit-registry-entry-class "IOService")
+    (allow iokit-get-properties
+      (iokit-property "IORegistryEntryPropertyKeys")
+      (iokit-property "chip-id")))
+  (with-filter (iokit-registry-entry-class "IOPlatformExpertDevice")
+    (allow iokit-get-properties
+      (iokit-property "platform-name")))
 
   ; Minimal IOKit connections needed for Metal compute
   (allow iokit-open
