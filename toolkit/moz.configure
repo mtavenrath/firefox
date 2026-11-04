@@ -4736,3 +4736,29 @@ def libmegazord_artifacts(value):
 
 
 set_config("MOZ_LIBMEGAZORD_ARTIFACTS", libmegazord_artifacts)
+
+
+option(
+    env="TENSORRT_SDK_DIR",
+    nargs=1,
+    help="Path to the TensorRT-RTX SDK for the WebNN backend",
+)
+
+
+@depends("TENSORRT_SDK_DIR", target)
+def webnn_trtx_sdk_dir(value, target):
+    if value and target.os == "WINNT":
+        return value[0]
+
+
+set_config("MOZ_WEBNN_TRTX_SDK_DIR", webnn_trtx_sdk_dir)
+
+
+@depends(target)
+def webnn_trtx_enabled(target):
+    if target.os == "WINNT" and target.cpu == "x86_64":
+        return True
+
+
+set_config("MOZ_WEBNN_TRTX", webnn_trtx_enabled)
+set_define("MOZ_WEBNN_TRTX", webnn_trtx_enabled)

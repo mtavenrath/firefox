@@ -1886,7 +1886,13 @@ bool SandboxBroker::SetSecurityLevelForUtilityProcess(
     case mozilla::ipc::SandboxingKind::WINDOWS_UTILS:
       return BuildUtilitySandbox(config, WindowsUtilitySandboxProps());
     case mozilla::ipc::SandboxingKind::HW_INFERENCE:
+#ifdef MOZ_WEBNN_TRTX
+      // TensorRT needs GPU driver access and runtime code generation.
+      SetSecurityLevelForGPUProcess(2);
+      return true;
+#else
       return BuildUtilitySandbox(config, GenericUtilitySandboxProps());
+#endif
     default:
       MOZ_ASSERT_UNREACHABLE("Unknown sandboxing value");
       return false;
