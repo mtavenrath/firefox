@@ -90,6 +90,16 @@ uint64_t GetLimit(const ffi::WGPULimits& limits, const Limit limit) {
       return limits.max_compute_workgroup_size_z;
     case Limit::MaxComputeWorkgroupsPerDimension:
       return limits.max_compute_workgroups_per_dimension;
+    case Limit::MaxBlasPrimitiveCount:
+      return limits.max_blas_primitive_count;
+    case Limit::MaxBlasGeometryCount:
+      return limits.max_blas_geometry_count;
+    case Limit::MaxTlasInstanceCount:
+      return limits.max_tlas_instance_count;
+    case Limit::MaxAccelerationStructuresPerShaderStage:
+      return limits.max_acceleration_structures_per_shader_stage;
+    case Limit::MaxBuffersAndAccelerationStructuresPerShaderStage:
+      return limits.max_buffers_and_acceleration_structures_per_shader_stage;
   }
   MOZ_CRASH("Bad Limit");
 }
@@ -201,6 +211,21 @@ void SetLimit(ffi::WGPULimits* const limits, const Limit limit,
       return;
     case Limit::MaxComputeWorkgroupsPerDimension:
       limits->max_compute_workgroups_per_dimension = val;
+      return;
+    case Limit::MaxBlasPrimitiveCount:
+      limits->max_blas_primitive_count = val;
+      return;
+    case Limit::MaxBlasGeometryCount:
+      limits->max_blas_geometry_count = val;
+      return;
+    case Limit::MaxTlasInstanceCount:
+      limits->max_tlas_instance_count = val;
+      return;
+    case Limit::MaxAccelerationStructuresPerShaderStage:
+      limits->max_acceleration_structures_per_shader_stage = val;
+      return;
+    case Limit::MaxBuffersAndAccelerationStructuresPerShaderStage:
+      limits->max_buffers_and_acceleration_structures_per_shader_stage = val;
       return;
   }
   MOZ_CRASH("Bad Limit");

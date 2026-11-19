@@ -18,6 +18,7 @@ use wgpu_core_remote_types::{
 pub mod client;
 pub mod command;
 pub mod error;
+pub mod ray_tracing;
 pub mod server;
 pub mod telemetry;
 
@@ -324,6 +325,8 @@ pub(crate) enum Message<'a> {
     DropDevice(id::DeviceId),
     DropQueue(id::QueueId),
     DropBuffer(id::BufferId),
+    DropBlas(id::BlasId),
+    DropTlas(id::TlasId),
     DropCommandEncoder(id::CommandEncoderId),
     DropRenderPassEncoder(id::RenderPassEncoderId),
     DropComputePassEncoder(id::ComputePassEncoderId),
@@ -368,6 +371,14 @@ enum DeviceAction<'a> {
     CreateRenderPipeline(id::RenderPipelineId, RenderPipelineDescriptor<'a>, bool),
     CreateRenderBundleEncoder(id::RenderBundleEncoderId, RenderBundleEncoderDescriptor<'a>),
     CreateQuerySet(id::QuerySetId, QuerySetDescriptor<'a>),
+    CreateBlas(
+        id::BlasId,
+        wgpu_core_remote_types::ray_tracing::BlasDescriptor<'a>,
+    ),
+    CreateTlas(
+        id::TlasId,
+        wgpu_core_remote_types::ray_tracing::TlasDescriptor<'a>,
+    ),
     CreateCommandEncoder(
         id::CommandEncoderId,
         wgt::CommandEncoderDescriptor<Label<'a>>,

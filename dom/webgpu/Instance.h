@@ -64,6 +64,7 @@ class Instance final : public nsWrapperCache {
     return PrefEnabled();
   }
   static bool ExternalTexturePrefEnabled(JSContext* aCx, JSObject* aObj);
+  static bool RayQueryPrefEnabled(JSContext* aCx, JSObject* aObj);
 
   static already_AddRefed<Instance> Create(nsIGlobalObject* aGlobal);
 

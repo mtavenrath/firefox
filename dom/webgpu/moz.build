@@ -8,6 +8,8 @@ with Files("**"):
 MOCHITEST_MANIFESTS += [
     "tests/mochitest/mochitest-disabled.toml",
     "tests/mochitest/mochitest-no-pref.toml",
+    "tests/mochitest/mochitest-ray-query-disabled.toml",
+    "tests/mochitest/mochitest-ray-query.toml",
     "tests/mochitest/mochitest-resistfingerprinting.toml",
     "tests/mochitest/mochitest.toml",
     "tests/mochitest/perftest.toml",
@@ -21,6 +23,7 @@ h_and_cpp = [
     "Adapter",
     "BindGroup",
     "BindGroupLayout",
+    "Blas",
     "Buffer",
     "CanvasContext",
     "CommandBuffer",
@@ -53,6 +56,7 @@ h_and_cpp = [
     "SupportedLimits",
     "Texture",
     "TextureView",
+    "Tlas",
     "Utility",
     "ValidationError",
 ]

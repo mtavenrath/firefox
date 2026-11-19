@@ -343,6 +343,10 @@ pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr) -> *mut Global {
         | wgt::InstanceFlags::AUTOMATIC_TIMESTAMP_NORMALIZATION
         | wgt::InstanceFlags::STRICT_WEBGPU_COMPLIANCE)
         .with_env();
+    instance_flags.set(
+        wgt::InstanceFlags::ALLOW_EXPERIMENTAL_RAY_QUERY,
+        static_prefs::pref!("dom.webgpu.experimental-ray-query.enabled"),
+    );
     if !static_prefs::pref!("dom.webgpu.hal-labels") {
         instance_flags.insert(wgt::InstanceFlags::DISCARD_HAL_LABELS);
     }
@@ -631,19 +635,13 @@ fn adapter_request_device(
         match support_dma_buf {
             false => {}
             true => {
-                let mut sanitized_desc = wgt::DeviceDescriptor {
-                    label: desc.label,
-                    required_features: wgt::Features::from_internal_flags(
-                        wgt::FeaturesWGPU::empty(),
-                        desc.required_features,
-                    )
-                    .union(additional_features),
-                    required_limits: desc.required_limits,
-                    default_queue: desc.default_queue,
-                    experimental_features: wgt::ExperimentalFeatures::disabled(),
-                    memory_hints: wgt::MemoryHints::MemoryUsage,
+                let mut sanitized_desc = wgpu_core_remote::global::map_device_descriptor(
+                    &desc,
                     trace,
-                };
+                    additional_features,
+                    global.instance().flags,
+                )
+                .map_err(request_device_error_to_ffi)?;
 
                 global
                     .adapter_validate_device_descriptor(self_id, &mut sanitized_desc)
@@ -2597,6 +2595,8 @@ impl Global {
             DeviceAction::CreateRenderBundleEncoder(id, desc) => {
                 self.device_create_render_bundle_encoder(device_id, &desc, id);
             }
+            DeviceAction::CreateBlas(id, desc) => self.device_create_blas(device_id, &desc, id),
+            DeviceAction::CreateTlas(id, desc) => self.device_create_tlas(device_id, &desc, id),
             DeviceAction::CreateQuerySet(id, desc) => {
                 self.device_create_query_set(device_id, &desc, id);
             }
@@ -2905,7 +2905,13 @@ unsafe fn process_message(
                 let info = AdapterInformation {
                     id: adapter_id,
                     limits: restrict_limits(global.adapter_limits(adapter_id)),
-                    features: global.adapter_features(adapter_id).features_webgpu,
+                    features: {
+                        let mut features = global.adapter_features(adapter_id).features_webgpu;
+                        if !static_prefs::pref!("dom.webgpu.experimental-ray-query.enabled") {
+                            features.remove(wgt::FeaturesWebGPU::EXPERIMENTAL_RAY_QUERY);
+                        }
+                        features
+                    },
                     name: Cow::Owned(name),
                     vendor,
                     device,
@@ -3210,6 +3216,12 @@ unsafe fn process_message(
         }
         Message::DropSampler(id) => {
             global.sampler_remove(id);
+        }
+        Message::DropBlas(id) => {
+            global.blas_remove(id);
+        }
+        Message::DropTlas(id) => {
+            global.tlas_remove(id);
         }
         Message::DropQuerySet(id) => {
             global.query_set_remove(id);

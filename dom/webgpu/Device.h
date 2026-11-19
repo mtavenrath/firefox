@@ -40,6 +40,8 @@ struct GPURenderPipelineDescriptor;
 struct GPUCommandEncoderDescriptor;
 struct GPUCanvasConfiguration;
 struct GPUQuerySetDescriptor;
+struct GPUBlasDescriptor;
+struct GPUTlasDescriptor;
 
 class EventHandlerNonNull;
 class Promise;
@@ -64,6 +66,8 @@ class AdapterInfo;
 class BindGroup;
 class BindGroupLayout;
 class Buffer;
+class Blas;
+class Tlas;
 class CommandEncoder;
 class ComputePipeline;
 class Fence;
@@ -108,6 +112,9 @@ class Device final : public DOMEventTargetHelper,
       bool aUseSharedTextureInSwapChain, gfx::SurfaceFormat aFormat,
       gfx::IntSize aCanvasSize);
   bool CheckNewWarning(const nsACString& aMessage);
+
+  already_AddRefed<Blas> CreateBlas(const dom::GPUBlasDescriptor& aDesc);
+  already_AddRefed<Tlas> CreateTlas(const dom::GPUTlasDescriptor& aDesc);
 
   void TrackBuffer(Buffer* aBuffer);
   void UntrackBuffer(Buffer* aBuffer);

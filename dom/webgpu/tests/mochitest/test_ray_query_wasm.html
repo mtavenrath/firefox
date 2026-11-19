@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Experimental ray queries from Rust and WebAssembly</title>
+<script src="/tests/SimpleTest/SimpleTest.js"></script>
+<script src="ray_query_smoke.js"></script>
+<link rel="stylesheet" href="/tests/SimpleTest/test.css" />
+<script type="module">
+  SimpleTest.waitForExplicitFinish();
+  SimpleTest.requestLongerTimeout(4);
+
+  function report(result, context) {
+    ok(!result.error, context + ": " + (result.error || "completed"));
+    for (const check of result.checks || []) {
+      ok(check.value, context + ": " + check.message);
+    }
+  }
+
+  function checkWgpu(data, context) {
+    is(data[0], 1, context + ": Rust wgpu ray hits triangle");
+    const distance = new Float32Array(new Uint32Array([data[1]]).buffer)[0];
+    ok(Math.abs(distance - 2) < 0.0001, context + ": Rust wgpu hit distance is two");
+    is(data[2], 7, context + ": Rust wgpu custom instance index survives");
+    is(data[3], 0, context + ": Rust wgpu primitive index is zero");
+  }
+
+  async function testBody() {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter?.features.has("wgpu-ray-query")) {
+      info("No ray-query capable adapter");
+      return;
+    }
+    const wasm = await import("./firefox_ray_query_wasm.js");
+    await wasm.default();
+    ok(await wasm.wgpu_requires_unsafe_opt_in(), "Rust wgpu requires unsafe experimental opt-in");
+    report(await runRayQuerySmoke(wasm.build_triangle_scene), "direct Rust/Wasm");
+    checkWgpu(await wasm.run_wgpu_ray_query(), "window");
+    const worker = new Worker("ray_query_wasm_worker.js");
+    try {
+      const result = await new Promise((resolve, reject) => {
+        worker.onmessage = event => resolve(event.data);
+        worker.onerror = reject;
+        worker.postMessage("run");
+      });
+      report(result, "worker direct Rust/Wasm");
+      ok(result.optIn, "Worker Rust wgpu requires unsafe experimental opt-in");
+      if (result.wgpu) {
+        checkWgpu(result.wgpu, "worker");
+      }
+    } finally {
+      worker.terminate();
+    }
+  }
+  testBody().catch(error => ok(false, "Unhandled exception: " + error + " " + error.stack))
+    .finally(() => SimpleTest.finish());
+</script>

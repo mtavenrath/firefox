@@ -21,6 +21,7 @@ class ErrorResult;
 
 namespace dom {
 struct GPUComputePassDescriptor;
+struct GPUAccelerationStructureBuildDescriptor;
 template <typename T>
 class Sequence;
 struct GPUCommandBufferDescriptor;
@@ -96,6 +97,10 @@ class CommandEncoder final : public nsWrapperCache,
                             const dom::GPUExtent3D& aCopySize);
   void ClearBuffer(const Buffer& aBuffer, const uint64_t aOffset,
                    const dom::Optional<uint64_t>& aSize);
+
+  void BuildAccelerationStructures(
+      const dom::GPUAccelerationStructureBuildDescriptor& aDesc,
+      ErrorResult& aRv);
 
   void PushDebugGroup(const nsAString& aString);
   void PopDebugGroup();

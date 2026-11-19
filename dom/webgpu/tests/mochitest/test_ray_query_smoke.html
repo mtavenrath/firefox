@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Experimental ray query build and hit tests</title>
+<script src="/tests/SimpleTest/SimpleTest.js"></script>
+<script src="ray_query_smoke.js"></script>
+<link rel="stylesheet" href="/tests/SimpleTest/test.css" />
+<script>
+  SimpleTest.waitForExplicitFinish();
+  SimpleTest.requestLongerTimeout(3);
+
+  function report(result, context) {
+    if (result.skipped) {
+      info(context + ": " + result.skipped);
+      return;
+    }
+    ok(!result.error, context + ": " + (result.error || "completed"));
+    for (const check of result.checks || []) {
+      ok(check.value, context + ": " + check.message);
+    }
+  }
+
+  async function testBody() {
+    report(await runRayQuerySmoke(), "window");
+    const worker = new Worker("ray_query_smoke.js");
+    const result = await new Promise((resolve, reject) => {
+      worker.onmessage = event => resolve(event.data);
+      worker.onerror = reject;
+      worker.postMessage("run");
+    });
+    report(result, "worker");
+    worker.terminate();
+  }
+
+  testBody().catch(error => ok(false, "Unhandled exception: " + error))
+    .finally(() => SimpleTest.finish());
+</script>

@@ -6343,6 +6343,13 @@
 #endif
   mirror: always
 
+# Experimental hardware ray queries; requires a restart and device opt-in.
+- name: dom.webgpu.experimental-ray-query.enabled
+  type: bool
+  value: false
+  mirror: once
+  rust: true
+
 # Whether WebGPU's GPUExternalTexture API is enabled.
 - name: dom.webgpu.external-texture.enabled
   type: bool

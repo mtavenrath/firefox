@@ -52,6 +52,11 @@ interface GPUSupportedLimits {
     readonly attribute unsigned long maxComputeWorkgroupSizeY;
     readonly attribute unsigned long maxComputeWorkgroupSizeZ;
     readonly attribute unsigned long maxComputeWorkgroupsPerDimension;
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"] readonly attribute unsigned long maxBlasPrimitiveCount;
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"] readonly attribute unsigned long maxBlasGeometryCount;
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"] readonly attribute unsigned long maxTlasInstanceCount;
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"] readonly attribute unsigned long maxAccelerationStructuresPerShaderStage;
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"] readonly attribute unsigned long maxBuffersAndAccelerationStructuresPerShaderStage;
 };
 
 [Func="mozilla::webgpu::Instance::PrefEnabled",
@@ -159,6 +164,7 @@ enum GPUFeatureName {
     "dual-source-blending",
     "subgroups",
     "primitive-index",
+    "wgpu-ray-query",
 };
 
 [Func="mozilla::webgpu::Instance::PrefEnabled",
@@ -175,6 +181,10 @@ interface GPUDevice : EventTarget {
     [Throws]
     GPUBuffer createBuffer(GPUBufferDescriptor descriptor);
     GPUTexture createTexture(GPUTextureDescriptor descriptor);
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"]
+    GPUBlas createBlas(GPUBlasDescriptor descriptor);
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"]
+    GPUTlas createTlas(GPUTlasDescriptor descriptor);
     [Throws, Func="mozilla::webgpu::Instance::ExternalTexturePrefEnabled"]
     GPUExternalTexture importExternalTexture(GPUExternalTextureDescriptor descriptor);
     GPUSampler createSampler(optional GPUSamplerDescriptor descriptor = {});
@@ -247,6 +257,7 @@ namespace GPUBufferUsage {
     const GPUFlagsConstant STORAGE       = 0x0080;
     const GPUFlagsConstant INDIRECT      = 0x0100;
     const GPUFlagsConstant QUERY_RESOLVE = 0x0200;
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"] const GPUFlagsConstant BLAS_INPUT = 0x0400;
 };
 
 typedef [EnforceRange] unsigned long GPUMapModeFlags;
@@ -537,6 +548,8 @@ dictionary GPUBindGroupLayoutEntry {
     GPUTextureBindingLayout texture;
     GPUStorageTextureBindingLayout storageTexture;
     GPUExternalTextureBindingLayout externalTexture;
+    [Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"]
+    GPUAccelerationStructureBindingLayout accelerationStructure;
 };
 
 typedef [EnforceRange] unsigned long GPUShaderStageFlags;
@@ -596,6 +609,8 @@ dictionary GPUStorageTextureBindingLayout {
     GPUTextureViewDimension viewDimension = "2d";
 };
 
+dictionary GPUAccelerationStructureBindingLayout {};
+
 dictionary GPUExternalTextureBindingLayout {
 };
 
@@ -616,7 +631,8 @@ typedef (GPUSampler or
          GPUTextureView or
          GPUBuffer or
          GPUBufferBinding or
-         GPUExternalTexture) GPUBindingResource;
+         GPUExternalTexture or
+         GPUTlas) GPUBindingResource;
 
 dictionary GPUBindGroupEntry {
     required GPUIndex32 binding;
@@ -1010,6 +1026,8 @@ interface mixin GPUCommandsMixin {
 [Func="mozilla::webgpu::Instance::PrefEnabled",
  Exposed=(Window, Worker), SecureContext]
 interface GPUCommandEncoder {
+    [Throws, Func="mozilla::webgpu::Instance::RayQueryPrefEnabled"]
+    undefined buildAccelerationStructures(optional GPUAccelerationStructureBuildDescriptor descriptor = {});
     GPURenderPassEncoder beginRenderPass(GPURenderPassDescriptor descriptor);
     GPUComputePassEncoder beginComputePass(optional GPUComputePassDescriptor descriptor = {});
 
@@ -1422,3 +1440,60 @@ dictionary GPUExtent3DDict {
     GPUIntegerCoordinate depthOrArrayLayers = 1;
 };
 typedef (sequence<GPUIntegerCoordinate> or GPUExtent3DDict) GPUExtent3D;
+
+[Func="mozilla::webgpu::Instance::RayQueryPrefEnabled", Exposed=(Window, Worker), SecureContext]
+interface GPUBlas {};
+GPUBlas includes GPUObjectBase;
+
+[Func="mozilla::webgpu::Instance::RayQueryPrefEnabled", Exposed=(Window, Worker), SecureContext]
+interface GPUTlas {};
+GPUTlas includes GPUObjectBase;
+
+enum GPUAccelerationStructureBuildPreference { "fast-trace", "fast-build" };
+
+dictionary GPUBlasGeometrySize {
+    required GPUSize32 vertexCount;
+    GPUIndexFormat indexFormat;
+    GPUSize32 indexCount = 0;
+    boolean opaque = true;
+};
+
+dictionary GPUBlasDescriptor : GPUObjectDescriptorBase {
+    required sequence<GPUBlasGeometrySize> geometries;
+    GPUAccelerationStructureBuildPreference buildPreference = "fast-trace";
+};
+
+dictionary GPUTlasDescriptor : GPUObjectDescriptorBase {
+    required GPUSize32 maxInstances;
+    GPUAccelerationStructureBuildPreference buildPreference = "fast-trace";
+};
+
+dictionary GPUBlasGeometry : GPUBlasGeometrySize {
+    required GPUBuffer vertexBuffer;
+    GPUSize32 firstVertex = 0;
+    GPUSize64 vertexStride = 12;
+    GPUBuffer indexBuffer;
+    GPUSize32 firstIndex = 0;
+};
+
+dictionary GPUBlasBuild {
+    required GPUBlas blas;
+    required sequence<GPUBlasGeometry> geometries;
+};
+
+dictionary GPUTlasInstance {
+    required GPUBlas blas;
+    required sequence<float> transform;
+    GPUSize32 customIndex = 0;
+    [EnforceRange] octet mask = 255;
+};
+
+dictionary GPUTlasBuild {
+    required GPUTlas tlas;
+    required sequence<GPUTlasInstance> instances;
+};
+
+dictionary GPUAccelerationStructureBuildDescriptor {
+    sequence<GPUBlasBuild> blasBuilds = [];
+    sequence<GPUTlasBuild> tlasBuilds = [];
+};

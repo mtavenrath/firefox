@@ -1,0 +1,12 @@
+[DEFAULT]
+subsuite = "webgpu"
+dupe-manifest = true
+run-if = ["!verify"]
+prefs = [
+  "dom.webgpu.enabled=true",
+  "dom.webgpu.experimental-ray-query.enabled=false",
+  "gfx.webgpu.ignore-blocklist=true",
+]
+scheme = "https"
+
+["test_ray_query_policy.html"]

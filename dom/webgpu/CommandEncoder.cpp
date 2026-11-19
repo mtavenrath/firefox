@@ -4,6 +4,7 @@
 
 #include "CommandEncoder.h"
 
+#include "Blas.h"
 #include "Buffer.h"
 #include "CommandBuffer.h"
 #include "ComputePassEncoder.h"
@@ -11,6 +12,7 @@
 #include "ExternalTexture.h"
 #include "RenderPassEncoder.h"
 #include "TextureView.h"
+#include "Tlas.h"
 #include "Utility.h"
 #include "mozilla/dom/WebGPUBinding.h"
 #include "mozilla/webgpu/CanvasContext.h"
@@ -82,6 +84,67 @@ void CommandEncoder::TrackPresentationContext(
   if (aTargetContext) {
     mPresentationContexts.AppendElement(aTargetContext);
   }
+}
+
+void CommandEncoder::BuildAccelerationStructures(
+    const dom::GPUAccelerationStructureBuildDescriptor& aDesc,
+    ErrorResult& aRv) {
+  nsTArray<nsTArray<ffi::WGPUFfiTriangleGeometry>> geometryStorage;
+  nsTArray<ffi::WGPUFfiBlasBuild> blases;
+  geometryStorage.SetCapacity(aDesc.mBlasBuilds.Length());
+  for (const auto& build : aDesc.mBlasBuilds) {
+    auto& geometries = *geometryStorage.AppendElement();
+    for (const auto& geometry : build.mGeometries) {
+      ffi::WGPUFfiTriangleGeometry g = {};
+      g.size.vertex_count = geometry.mVertexCount;
+      g.size.indexed = geometry.mIndexFormat.WasPassed();
+      g.size.index_format =
+          g.size.indexed ? ffi::WGPUIndexFormat(geometry.mIndexFormat.Value())
+                         : ffi::WGPUIndexFormat_Uint16;
+      g.size.index_count = geometry.mIndexCount;
+      g.size.opaque = geometry.mOpaque;
+      g.vertex_buffer = geometry.mVertexBuffer->GetId();
+      g.first_vertex = geometry.mFirstVertex;
+      g.vertex_stride = geometry.mVertexStride;
+      if (geometry.mIndexBuffer.WasPassed()) {
+        g.index_buffer = geometry.mIndexBuffer.Value().GetId();
+      }
+      g.first_index = geometry.mFirstIndex;
+      geometries.AppendElement(g);
+    }
+    ffi::WGPUFfiBlasBuild entry = {};
+    entry.blas = build.mBlas->GetId();
+    entry.geometries = {geometries.Elements(), geometries.Length()};
+    blases.AppendElement(entry);
+  }
+  nsTArray<nsTArray<ffi::WGPUFfiTlasInstance>> instanceStorage;
+  nsTArray<ffi::WGPUFfiTlasBuild> tlases;
+  instanceStorage.SetCapacity(aDesc.mTlasBuilds.Length());
+  for (const auto& build : aDesc.mTlasBuilds) {
+    auto& instances = *instanceStorage.AppendElement();
+    for (const auto& instance : build.mInstances) {
+      if (instance.mTransform.Length() != 12) {
+        aRv.ThrowTypeError(
+            "A TLAS instance transform must contain exactly 12 values");
+        return;
+      }
+      ffi::WGPUFfiTlasInstance i = {};
+      i.blas = instance.mBlas->GetId();
+      for (size_t j = 0; j < 12; ++j) {
+        i.transform[j] = instance.mTransform[j];
+      }
+      i.custom_index = instance.mCustomIndex;
+      i.mask = instance.mMask;
+      instances.AppendElement(i);
+    }
+    ffi::WGPUFfiTlasBuild entry = {};
+    entry.tlas = build.mTlas->GetId();
+    entry.instances = {instances.Elements(), instances.Length()};
+    tlases.AppendElement(entry);
+  }
+  ffi::wgpu_client_build_acceleration_structures(
+      GetClient(), GetId(), {blases.Elements(), blases.Length()},
+      {tlases.Elements(), tlases.Length()});
 }
 
 void CommandEncoder::CopyBufferToBuffer(

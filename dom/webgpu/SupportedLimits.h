@@ -52,7 +52,12 @@ enum class Limit : uint8_t {
   MaxComputeWorkgroupSizeY,
   MaxComputeWorkgroupSizeZ,
   MaxComputeWorkgroupsPerDimension,
-  _LAST = MaxComputeWorkgroupsPerDimension,
+  MaxBlasPrimitiveCount,
+  MaxBlasGeometryCount,
+  MaxTlasInstanceCount,
+  MaxAccelerationStructuresPerShaderStage,
+  MaxBuffersAndAccelerationStructuresPerShaderStage,
+  _LAST = MaxBuffersAndAccelerationStructuresPerShaderStage,
 };
 
 uint64_t GetLimit(const ffi::WGPULimits&, Limit);
@@ -103,6 +108,11 @@ class SupportedLimits final : public nsWrapperCache, public ChildOf<Adapter> {
   _(MaxComputeWorkgroupSizeY)
   _(MaxComputeWorkgroupSizeZ)
   _(MaxComputeWorkgroupsPerDimension)
+  _(MaxBlasPrimitiveCount)
+  _(MaxBlasGeometryCount)
+  _(MaxTlasInstanceCount)
+  _(MaxAccelerationStructuresPerShaderStage)
+  _(MaxBuffersAndAccelerationStructuresPerShaderStage)
 
 #undef _
 

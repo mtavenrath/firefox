@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <script src="/tests/SimpleTest/SimpleTest.js"></script>
+    <link rel="stylesheet" href="/tests/SimpleTest/test.css" />
+  </head>
+  <body>
+    <script>
+      SimpleTest.waitForExplicitFinish();
+      const rayLimits = [
+        "maxBlasPrimitiveCount",
+        "maxBlasGeometryCount",
+        "maxTlasInstanceCount",
+        "maxAccelerationStructuresPerShaderStage",
+        "maxBuffersAndAccelerationStructuresPerShaderStage",
+      ];
+
+      async function rejectsRequest(adapter, descriptor, expectedName) {
+        try {
+          const device = await adapter.requestDevice(descriptor);
+          device.destroy();
+          ok(false, "requestDevice should reject");
+        } catch (error) {
+          is(error.name, expectedName, "requestDevice rejection type");
+        }
+      }
+
+      async function testBody() {
+        const enabled = SpecialPowers.getBoolPref(
+          "dom.webgpu.experimental-ray-query.enabled"
+        );
+        for (const limit of rayLimits) {
+          is(limit in GPUSupportedLimits.prototype, enabled,
+             `${limit} exposure follows startup policy`);
+        }
+        is("GPUBlas" in globalThis, enabled, "BLAS interface follows startup policy");
+        is("GPUTlas" in globalThis, enabled, "TLAS interface follows startup policy");
+        is("BLAS_INPUT" in GPUBufferUsage, enabled, "Input buffer usage follows startup policy");
+        is("createBlas" in GPUDevice.prototype, enabled, "BLAS method follows startup policy");
+        is("buildAccelerationStructures" in GPUCommandEncoder.prototype, enabled, "Build method follows startup policy");
+        if (enabled) {
+          is(typeof GPUBlas.prototype.destroy, "undefined", "BLAS lifetime is automatic");
+          is(typeof GPUTlas.prototype.destroy, "undefined", "TLAS lifetime is automatic");
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          info("No WebGPU adapter; device tests require a supported GPU");
+          return;
+        }
+        const supported = adapter.features.has("wgpu-ray-query");
+        ok(enabled || !supported, "Disabled policy never advertises ray queries");
+        const ordinary = await adapter.requestDevice();
+        ok(!ordinary.features.has("wgpu-ray-query"), "Explicit device opt-in is required");
+        if (enabled) {
+          for (const limit of rayLimits) {
+            is(ordinary.limits[limit], 0, "Ordinary device has no ray-query limits");
+          }
+        }
+        ordinary.pushErrorScope("validation");
+        ordinary.createShaderModule({code: `
+          enable wgpu_ray_query;
+          @compute @workgroup_size(1) fn main() {
+            var query: ray_query;
+          }
+        `});
+        ok(await ordinary.popErrorScope(), "Ray-query WGSL requires device opt-in");
+        ordinary.destroy();
+
+        const missingFeature = await navigator.gpu.requestAdapter();
+        await rejectsRequest(missingFeature, {
+          requiredLimits: {maxBlasPrimitiveCount: 1},
+        }, "OperationError");
+
+        const requestedAdapter = await navigator.gpu.requestAdapter();
+        if (!supported) {
+          await rejectsRequest(requestedAdapter, {
+            requiredFeatures: ["wgpu-ray-query"],
+          }, "TypeError");
+          info("No ray-query support; positive device tests require supported hardware");
+          return;
+        }
+        const device = await requestedAdapter.requestDevice({
+          requiredFeatures: ["wgpu-ray-query"],
+        });
+        ok(device.features.has("wgpu-ray-query"), "Opted-in device reports the feature");
+        for (const limit of rayLimits) {
+          ok(device.limits[limit] > 0, `${limit} has a usable default`);
+          ok(device.limits[limit] <= requestedAdapter.limits[limit],
+             `${limit} does not exceed adapter capabilities`);
+        }
+        device.pushErrorScope("validation");
+        const shader = device.createShaderModule({code: `
+          enable wgpu_ray_query;
+          @compute @workgroup_size(1) fn main() {
+            var query: ray_query;
+          }
+        `});
+        const compilation = await shader.getCompilationInfo();
+        ok(!compilation.messages.some(message => message.type === "error"),
+           "Ray-query WGSL compiles on an opted-in device");
+        is(await device.popErrorScope(), null, "Shader validation succeeds");
+        device.destroy();
+
+        const excessAdapter = await navigator.gpu.requestAdapter();
+        await rejectsRequest(excessAdapter, {
+          requiredFeatures: ["wgpu-ray-query"],
+          requiredLimits: {
+            maxBlasPrimitiveCount: excessAdapter.limits.maxBlasPrimitiveCount + 1,
+          },
+        }, "OperationError");
+      }
+
+      testBody().catch(error => ok(false, "Unhandled exception " + error))
+        .finally(() => SimpleTest.finish());
+    </script>
+  </body>
+</html>

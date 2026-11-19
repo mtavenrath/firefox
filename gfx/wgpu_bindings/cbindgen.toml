@@ -41,6 +41,9 @@ using WGPUOption_DeviceId = uint64_t;
 using WGPUAdapterId = uint64_t;
 using WGPUBindGroupId = uint64_t;
 using WGPUBindGroupLayoutId = uint64_t;
+using WGPUBlasId = uint64_t;
+using WGPUTlasId = uint64_t;
+using WGPUOption_TlasId = uint64_t;
 using WGPUBufferId = uint64_t;
 using WGPUCommandBufferId = uint64_t;
 using WGPUCommandEncoderId = uint64_t;
@@ -78,6 +81,7 @@ prefix = "WGPU"
 renaming_overrides_prefixing = true
 exclude = [
 	"Option_AdapterId",
+	"Option_TlasId",
 	"Option_BufferId",
 	"Option_BindGroupId",
 	"Option_PipelineLayoutId",

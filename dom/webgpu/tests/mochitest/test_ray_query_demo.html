@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Experimental ray query raster demo</title>
+<script src="/tests/SimpleTest/SimpleTest.js"></script>
+<link rel="stylesheet" href="/tests/SimpleTest/test.css" />
+<canvas id="image" width="128" height="128"></canvas>
+<script type="module">
+  SimpleTest.waitForExplicitFinish();
+  SimpleTest.requestLongerTimeout(3);
+  async function testBody() {
+    const {renderTriangle} = await import("./ray_query_triangle.mjs");
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter?.features.has("wgpu-ray-query")) {
+      info("No ray-query capable adapter");
+      return;
+    }
+    const device = await adapter.requestDevice({requiredFeatures: ["wgpu-ray-query"]});
+    try {
+      const pixels = await renderTriangle(device, 128, 128);
+      is(pixels.length, 128 * 128 * 4, "One RGBA result per ray");
+      const center = (64 * 128 + 64) * 4;
+      ok(pixels[center] !== 18 || pixels[center + 1] !== 26,
+        "Center ray returns triangle barycentric color");
+      is(pixels[0], 18, "Corner ray returns background red");
+      is(pixels[1], 26, "Corner ray returns background green");
+      is(pixels[2], 43, "Corner ray returns background blue");
+      ok(pixels.every((value, index) => index % 4 !== 3 || value === 255),
+        "Every output pixel is opaque");
+      const canvas = document.querySelector("#image");
+      canvas.getContext("2d").putImageData(new ImageData(pixels, 128, 128), 0, 0);
+      info("RayQueryDemoPNG:" + canvas.toDataURL("image/png"));
+    } finally {
+      device.destroy();
+    }
+  }
+  testBody().catch(error => ok(false, "Unhandled exception: " + error))
+    .finally(() => SimpleTest.finish());
+</script>

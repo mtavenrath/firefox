@@ -244,6 +244,9 @@ struct FeatureImplementationStatus {
         return unimplemented(
             "https://bugzilla.mozilla.org/show_bug.cgi?id=1989116");
 
+      case dom::GPUFeatureName::Wgpu_ray_query:
+        return implemented(WGPUWEBGPU_FEATURE_RAY_QUERY);
+
       case dom::GPUFeatureName::Core_features_and_limits:
         // NOTE: `0` means that no bits are set in calling code, but this is on
         // purpose. We currently _always_ return this feature elsewhere. If this
@@ -282,49 +285,19 @@ Adapter::Adapter(Instance* const aParent, WebGPUChild* const aChild,
     }
   };
 
-  static const auto FEATURE_BY_BIT = []() {
-    auto ret =
-        std::unordered_map<ffi::WGPUFeaturesWebGPU, dom::GPUFeatureName>{};
-
-    for (const auto feature :
-         dom::MakeWebIDLEnumeratedRange<dom::GPUFeatureName>()) {
-      const auto status = FeatureImplementationStatus::fromDomFeature(feature);
-      switch (status.tag) {
-        case FeatureImplementationStatusTag::Implemented:
-          ret[status.value.implemented.wgpuBit] = feature;
-          break;
-        case FeatureImplementationStatusTag::NotImplemented:
-          break;
-      }
-    }
-
-    return ret;
-  }();
-
-  auto remainingFeatureBits = aInfo->features;
-  auto bitMask = decltype(remainingFeatureBits){0};
-  while (remainingFeatureBits) {
-    if (bitMask) {
-      bitMask <<= 1;
-    } else {
-      bitMask = 1;
-    }
-    const auto bit = remainingFeatureBits & bitMask;
-    remainingFeatureBits &= ~bitMask;  // Clear bit.
-    if (!bit) {
+  auto availableFeatures = aInfo->features;
+  if (GetParentObject()->ShouldResistFingerprinting(RFPTarget::WebGPULimits)) {
+    availableFeatures &= ~WGPUWEBGPU_FEATURE_RAY_QUERY;
+  }
+  for (const auto feature :
+       dom::MakeWebIDLEnumeratedRange<dom::GPUFeatureName>()) {
+    const auto status = FeatureImplementationStatus::fromDomFeature(feature);
+    if (status.tag != FeatureImplementationStatusTag::Implemented) {
       continue;
     }
-
-    const auto featureForBit = FEATURE_BY_BIT.find(bit);
-    if (featureForBit != FEATURE_BY_BIT.end()) {
-      addFeature(featureForBit->second);
-    } else {
-      // One of two cases:
-      //
-      // 1. WGPU claims to implement this, but we've explicitly marked this as
-      // not implemented.
-      // 2. We don't recognize that bit, but maybe it's a wpgu-native-only
-      // feature.
+    const auto& bits = status.value.implemented;
+    if (bits.wgpuBit && (availableFeatures & bits.wgpuBit) == bits.wgpuBit) {
+      addFeature(feature);
     }
   }
   // TODO: Once we implement compat mode (see
@@ -430,6 +403,16 @@ static std::string_view ToJsKey(const Limit limit) {
       return "maxComputeWorkgroupSizeZ";
     case Limit::MaxComputeWorkgroupsPerDimension:
       return "maxComputeWorkgroupsPerDimension";
+    case Limit::MaxBlasPrimitiveCount:
+      return "maxBlasPrimitiveCount";
+    case Limit::MaxBlasGeometryCount:
+      return "maxBlasGeometryCount";
+    case Limit::MaxTlasInstanceCount:
+      return "maxTlasInstanceCount";
+    case Limit::MaxAccelerationStructuresPerShaderStage:
+      return "maxAccelerationStructuresPerShaderStage";
+    case Limit::MaxBuffersAndAccelerationStructuresPerShaderStage:
+      return "maxBuffersAndAccelerationStructuresPerShaderStage";
   }
   MOZ_CRASH("Bad Limit");
 }
@@ -527,6 +510,24 @@ already_AddRefed<dom::Promise> Adapter::RequestDevice(
       }
     }
 
+    const bool rayQueryRequested = featureBits & WGPUWEBGPU_FEATURE_RAY_QUERY;
+    if (rayQueryRequested) {
+      deviceLimits.max_blas_primitive_count =
+          std::min<uint32_t>(mLimits->mFfi->max_blas_primitive_count, 1024);
+      deviceLimits.max_blas_geometry_count =
+          std::min<uint32_t>(mLimits->mFfi->max_blas_geometry_count, 1);
+      deviceLimits.max_tlas_instance_count =
+          std::min<uint32_t>(mLimits->mFfi->max_tlas_instance_count, 64);
+      deviceLimits.max_acceleration_structures_per_shader_stage =
+          std::min<uint32_t>(
+              mLimits->mFfi->max_acceleration_structures_per_shader_stage, 1);
+      deviceLimits.max_buffers_and_acceleration_structures_per_shader_stage =
+          std::min<uint32_t>(
+              mLimits->mFfi
+                  ->max_buffers_and_acceleration_structures_per_shader_stage,
+              29);
+    }
+
     // -
     // Validate Limits
 
@@ -553,6 +554,13 @@ already_AddRefed<dom::Promise> Adapter::RequestDevice(
 
         const auto& limit = itr->second;
         uint64_t requestedValue = entry.mValue;
+        if (limit >= Limit::MaxBlasPrimitiveCount &&
+            (!rayQueryRequested ||
+             !Instance::RayQueryPrefEnabled(nullptr, nullptr))) {
+          promise->MaybeRejectWithOperationError(
+              "Acceleration structure limits require wgpu-ray-query.");
+          return;
+        }
         const auto supportedValue = GetLimit(*mLimits->mFfi, limit);
         if (StringBeginsWith(keyU8, "max"_ns)) {
           if (requestedValue > supportedValue) {

@@ -61,6 +61,11 @@ GPU_IMPL_CYCLE_COLLECTION(Instance, mGlobal, mWgslLanguageFeatures)
   return StaticPrefs::dom_webgpu_external_texture_enabled_AtStartup();
 }
 
+/* static */ bool Instance::RayQueryPrefEnabled(JSContext* aCx,
+                                                JSObject* aObj) {
+  return StaticPrefs::dom_webgpu_experimental_ray_query_enabled_AtStartup();
+}
+
 /*static*/
 already_AddRefed<Instance> Instance::Create(nsIGlobalObject* aGlobal) {
   RefPtr<Instance> result = new Instance(aGlobal);

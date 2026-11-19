@@ -6,6 +6,7 @@
 
 #include "Adapter.h"
 #include "BindGroup.h"
+#include "Blas.h"
 #include "Buffer.h"
 #include "CommandEncoder.h"
 #include "CompilationInfo.h"
@@ -25,6 +26,7 @@
 #include "SupportedLimits.h"
 #include "Texture.h"
 #include "TextureView.h"
+#include "Tlas.h"
 #include "Utility.h"
 #include "ValidationError.h"
 #include "ipc/WebGPUChild.h"
@@ -280,6 +282,44 @@ already_AddRefed<RenderBundleEncoder> Device::CreateRenderBundleEncoder(
   return encoder.forget();
 }
 
+already_AddRefed<Blas> Device::CreateBlas(const dom::GPUBlasDescriptor& aDesc) {
+  nsTArray<ffi::WGPUFfiTriangleSize> geometries;
+  for (const auto& geometry : aDesc.mGeometries) {
+    ffi::WGPUFfiTriangleSize size = {};
+    size.vertex_count = geometry.mVertexCount;
+    size.indexed = geometry.mIndexFormat.WasPassed();
+    size.index_format =
+        size.indexed ? ffi::WGPUIndexFormat(geometry.mIndexFormat.Value())
+                     : ffi::WGPUIndexFormat_Uint16;
+    size.index_count = geometry.mIndexCount;
+    size.opaque = geometry.mOpaque;
+    geometries.AppendElement(size);
+  }
+  ffi::WGPUFfiBlasDescriptor desc = {};
+  StringHelper label(aDesc.mLabel);
+  desc.label = label.Get();
+  desc.geometries = {geometries.Elements(), geometries.Length()};
+  desc.fast_build = aDesc.mBuildPreference ==
+                    dom::GPUAccelerationStructureBuildPreference::Fast_build;
+  RawId id = ffi::wgpu_client_create_blas(GetClient(), GetId(), &desc);
+  RefPtr<Blas> blas = new Blas(this, id);
+  blas->SetLabel(aDesc.mLabel);
+  return blas.forget();
+}
+
+already_AddRefed<Tlas> Device::CreateTlas(const dom::GPUTlasDescriptor& aDesc) {
+  ffi::WGPUFfiTlasDescriptor desc = {};
+  StringHelper label(aDesc.mLabel);
+  desc.label = label.Get();
+  desc.max_instances = aDesc.mMaxInstances;
+  desc.fast_build = aDesc.mBuildPreference ==
+                    dom::GPUAccelerationStructureBuildPreference::Fast_build;
+  RawId id = ffi::wgpu_client_create_tlas(GetClient(), GetId(), &desc);
+  RefPtr<Tlas> tlas = new Tlas(this, id);
+  tlas->SetLabel(aDesc.mLabel);
+  return tlas.forget();
+}
+
 already_AddRefed<QuerySet> Device::CreateQuerySet(
     const dom::GPUQuerySetDescriptor& aDesc, ErrorResult& aRv) {
   ffi::WGPURawQuerySetDescriptor desc = {};
@@ -419,6 +459,10 @@ already_AddRefed<BindGroupLayout> Device::CreateBindGroupLayout(
           break;
       }
     }
+    if (entry.mAccelerationStructure.WasPassed()) {
+      markTypeFound();
+      e.ty = ffi::WGPURawBindingType_AccelerationStructure;
+    }
     if (entry.mExternalTexture.WasPassed()) {
       markTypeFound();
       e.ty = ffi::WGPURawBindingType_ExternalTexture;
@@ -529,6 +573,8 @@ already_AddRefed<BindGroup> Device::CreateBindGroup(
     } else if (entry.mResource.IsGPUTextureView()) {
       auto texture_view = entry.mResource.GetAsGPUTextureView();
       setTextureViewBinding(texture_view);
+    } else if (entry.mResource.IsGPUTlas()) {
+      e.acceleration_structure = entry.mResource.GetAsGPUTlas()->GetId();
     } else if (entry.mResource.IsGPUSampler()) {
       e.sampler = entry.mResource.GetAsGPUSampler()->GetId();
     } else if (entry.mResource.IsGPUExternalTexture()) {

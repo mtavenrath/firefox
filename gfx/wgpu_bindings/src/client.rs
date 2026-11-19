@@ -220,6 +220,7 @@ pub enum RawBindingType {
     WriteonlyStorageTexture,
     ReadWriteStorageTexture,
     ExternalTexture,
+    AccelerationStructure,
     Error,
 }
 
@@ -276,6 +277,7 @@ pub struct FfiBindGroupEntry {
     sampler: Option<id::SamplerId>,
     texture_view: Option<id::TextureViewId>,
     external_texture: Option<id::ExternalTextureId>,
+    acceleration_structure: Option<id::TlasId>,
 }
 
 #[repr(C)]
@@ -323,7 +325,7 @@ pub struct WebGPUChildPtr(*mut core::ffi::c_void);
 pub struct Client {
     owner: WebGPUChildPtr,
     message_queue: Mutex<MessageQueue>,
-    identities: Mutex<IdentityHub>,
+    pub(crate) identities: Mutex<IdentityHub>,
     external_texture_sources: Mutex<IdentityManager<crate::ExternalTextureSource>>,
 }
 
@@ -1608,6 +1610,7 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group_layout(
                 texture: FfiOption::None,
                 storage_texture: FfiOption::None,
                 external_texture: false,
+                acceleration_structure: false,
             };
             match entry.ty {
                 RawBindingType::UniformBuffer => {
@@ -1660,6 +1663,7 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group_layout(
                     out.storage_texture = storage_texture(wgt::StorageTextureAccess::ReadWrite)
                 }
                 RawBindingType::ExternalTexture => out.external_texture = true,
+                RawBindingType::AccelerationStructure => out.acceleration_structure = true,
                 RawBindingType::Error => return Err((idx, entry.error_case)),
             }
             Ok(out)
@@ -1781,6 +1785,8 @@ pub unsafe extern "C" fn wgpu_client_create_bind_group(
                 BindingResource::Sampler(id)
             } else if let Some(id) = entry.texture_view {
                 BindingResource::TextureView(id)
+            } else if let Some(id) = entry.acceleration_structure {
+                BindingResource::AccelerationStructure(id)
             } else if let Some(id) = entry.external_texture {
                 BindingResource::ExternalTexture(id)
             } else {
